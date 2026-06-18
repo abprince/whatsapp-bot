@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "axios": "^1.18.0",
     "express": "^5.2.1",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
