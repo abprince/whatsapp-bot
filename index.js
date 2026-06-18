@@ -60,12 +60,45 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+                console.log('🔄 Reconnecting in 10 seconds...');
                 setTimeout(connectToWhatsApp, 10000);
             }
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // ==================== COMMAND HANDLER ====================
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.key.fromMe && msg.message?.conversation) {
+            
+            const text = msg.message.conversation.toLowerCase().trim();
+            const from = msg.key.remoteJid;
+
+            console.log(`📩 Received: ${text}`);
+
+            if (text === 'hi' || text === 'hello') {
+                await sock.sendMessage(from, { text: 'Hello! I am your WhatsApp Bot 🤖' });
+            } 
+            else if (text === 'ping') {
+                await sock.sendMessage(from, { text: '✅ Pong! Bot is alive and working.' });
+            } 
+            else if (text === 'time') {
+                await sock.sendMessage(from, { text: `🕒 Current Time: ${new Date().toLocaleString()}` });
+            } 
+            else if (text === 'menu' || text === 'help') {
+                await sock.sendMessage(from, { 
+                    text: `📋 *Available Commands:*\n\n` +
+                          `• hi / hello\n` +
+                          `• ping\n` +
+                          `• time\n` +
+                          `• menu / help` 
+                });
+            }
+        }
+    });
+    // =======================================================
 }
 
 connectToWhatsApp();
