@@ -1,14 +1,25 @@
 const express = require('express');
+const qrcode = require('qrcode-terminal');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// Health check for Render
-app.get('/', (req, res) => res.send('✅ WhatsApp Bot is Running on Render!'));
+app.get('/', (req, res) => {
+    res.send(`
+        <h1>✅ WhatsApp Bot is Running!</h1>
+        <p><a href="/qr" target="_blank">👉 Click Here to Scan QR Code</a></p>
+    `);
+});
+
+// New route to show QR Code
+app.get('/qr', (req, res) => {
+    res.send('<h2>Scan this QR Code with WhatsApp</h2><pre id="qr"></pre>');
+});
 
 let sock;
+let currentQR = null;
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -17,37 +28,32 @@ async function connectToWhatsApp() {
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true,
+        printQRInTerminal: false,   // Disable old QR
         logger: pino({ level: 'silent' }),
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) console.log('📱 QR Code received - Scan it!');
-        
+        if (qr) {
+            currentQR = qr;
+            console.log('📱 New QR Code Generated');
+            qrcode.generate(qr, { small: true });
+        }
+
+        if (connection === 'open') {
+            console.log('✅ Bot is Online!');
+            currentQR = null;
+        }
+
         if (connection === 'close') {
             if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 Reconnecting...');
-                connectToWhatsApp();
+                setTimeout(connectToWhatsApp, 5000);
             }
-        } else if (connection === 'open') {
-            console.log('✅ Bot is Online!');
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
-
-    // Simple auto-reply example
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.key.fromMe && msg.message?.conversation) {
-            const text = msg.message.conversation.toLowerCase();
-            if (text === 'hi' || text === 'hello') {
-                await sock.sendMessage(msg.key.remoteJid, { text: 'Hello! I am your WhatsApp Bot 🤖' });
-            }
-        }
-    });
 }
 
 connectToWhatsApp();
