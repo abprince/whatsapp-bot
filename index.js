@@ -1,12 +1,12 @@
 const express = require('express');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-let currentQR = '';
+let currentQR = null;
 
 app.get('/', (req, res) => {
     res.send(`
@@ -15,15 +15,20 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.get('/qr', (req, res) => {
+app.get('/qr', async (req, res) => {
     if (currentQR) {
-        res.send(`
-            <h2>Scan this QR Code with WhatsApp</h2>
-            <pre style="font-size: 11px; line-height: 9px; background:#000; color:#0f0; padding:15px;">${currentQR}</pre>
-            <p><small>Refresh this page if QR is expired.</small></p>
-        `);
+        try {
+            const qrImage = await QRCode.toDataURL(currentQR);
+            res.send(`
+                <h2>Scan this QR Code with WhatsApp</h2>
+                <img src="${qrImage}" width="300" height="300" />
+                <p><small>Refresh this page if the QR code expires.</small></p>
+            `);
+        } catch (e) {
+            res.send('<h2>Error generating QR. Please refresh.</h2>');
+        }
     } else {
-        res.send('<h2>Waiting for QR Code... Please refresh after 5-10 seconds.</h2>');
+        res.send('<h2>Waiting for QR Code... Refresh after 5-10 seconds.</h2>');
     }
 });
 
@@ -44,16 +49,13 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            currentQR = '';
-            qrcode.generate(qr, { small: true }, (qrcodeString) => {
-                currentQR = qrcodeString;
-                console.log('📱 New QR Code Generated (Browser Ready)');
-            });
+            currentQR = qr;
+            console.log('📱 New QR Code Generated');
         }
 
         if (connection === 'open') {
             console.log('✅ Bot is Online!');
-            currentQR = '✅ Bot Connected Successfully!';
+            currentQR = null;
         }
 
         if (connection === 'close') {
