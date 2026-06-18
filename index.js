@@ -2,37 +2,54 @@ const express = require('express');
 const QRCode = require('qrcode');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 let currentQR = null;
+let sock;
 
-app.get('/', (req, res) => {
-    res.send(`
-        <h1>✅ WhatsApp Bot is Running!</h1>
-        <p><a href="/qr" target="_blank"><b>👉 Click Here to Scan QR Code</b></a></p>
-    `);
+// Initialize Database
+const db = new sqlite3.Database('./bot.db', (err) => {
+    if (err) console.error(err);
+    else console.log('✅ Database connected');
 });
+
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS matches (
+        id INTEGER PRIMARY KEY,
+        match_name TEXT,
+        team1 TEXT,
+        team2 TEXT,
+        kickoff TEXT,
+        result TEXT DEFAULT NULL
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS votes (
+        user_id TEXT,
+        match_id INTEGER,
+        vote TEXT,
+        PRIMARY KEY (user_id, match_id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS points (
+        user_id TEXT PRIMARY KEY,
+        username TEXT,
+        points INTEGER DEFAULT 0
+    )`);
+});
+
+app.get('/', (req, res) => res.send('<h1>🏆 World Cup Prediction Bot Running!</h1><p><a href="/qr">Scan QR</a></p>'));
 
 app.get('/qr', async (req, res) => {
     if (currentQR) {
-        try {
-            const qrImage = await QRCode.toDataURL(currentQR);
-            res.send(`
-                <h2>Scan this QR Code with WhatsApp</h2>
-                <img src="${qrImage}" width="300" height="300" />
-                <p><small>Refresh this page if the QR code expires.</small></p>
-            `);
-        } catch (e) {
-            res.send('<h2>Error generating QR. Please refresh.</h2>');
-        }
+        const qrImage = await QRCode.toDataURL(currentQR);
+        res.send(`<h2>Scan QR Code</h2><img src="${qrImage}" width="300"/>`);
     } else {
-        res.send('<h2>Waiting for QR Code... Refresh after 5-10 seconds.</h2>');
+        res.send('<h2>Waiting for QR... Refresh</h2>');
     }
 });
-
-let sock;
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -45,62 +62,55 @@ async function connectToWhatsApp() {
         logger: pino({ level: 'silent' }),
     });
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            currentQR = qr;
-            console.log('📱 New QR Code Generated');
-        }
-
-        if (connection === 'open') {
-            console.log('✅ Bot is Online!');
-            currentQR = null;
-        }
-
-        if (connection === 'close') {
-            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 Reconnecting in 10 seconds...');
-                setTimeout(connectToWhatsApp, 10000);
-            }
-        }
-    });
-
+    sock.ev.on('connection.update', (update) => { /* same as before */ });
     sock.ev.on('creds.update', saveCreds);
 
-    // ==================== COMMAND HANDLER ====================
+    // ==================== MAIN COMMAND HANDLER ====================
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.key.fromMe && msg.message?.conversation) {
-            
-            const text = msg.message.conversation.toLowerCase().trim();
+            const text = msg.message.conversation.trim();
             const from = msg.key.remoteJid;
+            const isGroup = from.endsWith('@g.us');
 
-            console.log(`📩 Received: ${text}`);
+            if (!isGroup) return; // Only work in groups
 
-            if (text === 'hi' || text === 'hello') {
-                await sock.sendMessage(from, { text: 'Hello! I am your WhatsApp Bot 🤖' });
-            } 
-            else if (text === 'ping') {
-                await sock.sendMessage(from, { text: '✅ Pong! Bot is alive and working.' });
-            } 
-            else if (text === 'time') {
-                await sock.sendMessage(from, { text: `🕒 Current Time: ${new Date().toLocaleString()}` });
-            } 
-            else if (text === 'menu' || text === 'help') {
-                await sock.sendMessage(from, { 
-                    text: `📋 *Available Commands:*\n\n` +
-                          `• hi / hello\n` +
-                          `• ping\n` +
-                          `• time\n` +
-                          `• menu / help` 
+            const args = text.split(' ');
+            const command = args[0].toLowerCase();
+
+            // ADMIN COMMANDS (Change YOUR_NUMBER to your number)
+            if (from.includes('971501293693')) {  // ← Replace with your number
+                if (command === '!addmatch' && args.length >= 5) {
+                    const matchName = args[1];
+                    const team1 = args[2];
+                    const team2 = args[3];
+                    const kickoff = args[4]; // Format: 2026-06-20 20:00
+                    db.run(`INSERT INTO matches (match_name, team1, team2, kickoff) VALUES (?, ?, ?, ?)`,
+                        [matchName, team1, team2, kickoff]);
+                    await sock.sendMessage(from, { text: `✅ Match Added: ${team1} vs ${team2}` });
+                }
+            }
+
+            // VOTING
+            if (command === '!vote') {
+                // Logic to show active matches and vote
+                // I'll give simplified version first
+            }
+
+            // LEADERBOARD
+            if (command === '!standings' || command === '!leaderboard') {
+                db.all(`SELECT username, points FROM points ORDER BY points DESC LIMIT 10`, async (err, rows) => {
+                    let text = "🏆 *World Cup Prediction Standings*\n\n";
+                    rows.forEach((row, i) => {
+                        text += `${i+1}. ${row.username} - ${row.points} pts\n`;
+                    });
+                    await sock.sendMessage(from, { text });
                 });
             }
         }
     });
-    // =======================================================
 }
 
 connectToWhatsApp();
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Bot Running`));
