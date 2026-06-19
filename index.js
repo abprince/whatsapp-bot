@@ -21,41 +21,47 @@ function getUserId(jid) {
 }
 
 // ==================== PROFILE PICTURE FETCHING ====================
+// ==================== PROFILE PICTURE FETCHING (FIXED) ====================
 async function fetchProfilePicture(sock, jid) {
+    // Extract the pure number from the JID
+    const pureNumber = jid.replace(/@[a-z.]+/g, '');
+    
+    // Create the correct JID format for profile picture
+    // WhatsApp expects: number@s.whatsapp.net for profile pictures
+    const correctJid = `${pureNumber}@s.whatsapp.net`;
+    
+    console.log(`📸 Fetching profile picture for: ${correctJid} (original: ${jid})`);
+    
     try {
-        console.log(`📸 Fetching profile picture for: ${jid}`);
-        
-        // Try preview first (faster, lower quality)
-        const previewUrl = await sock.profilePictureUrl(jid, 'preview');
+        // Try preview first
+        const previewUrl = await sock.profilePictureUrl(correctJid, 'preview');
         if (previewUrl) {
-            console.log(`✅ Profile picture found (preview) for: ${jid}`);
+            console.log(`✅ Profile picture found (preview) for: ${correctJid}`);
             return previewUrl;
         }
     } catch (error) {
-        console.log(`📸 No preview for ${jid}:`, error.message);
+        console.log(`📸 No preview for ${correctJid}:`, error.message);
     }
     
     try {
-        // Try high-res image (slower, better quality)
-        const highResUrl = await sock.profilePictureUrl(jid, 'image');
+        // Try high-res image
+        const highResUrl = await sock.profilePictureUrl(correctJid, 'image');
         if (highResUrl) {
-            console.log(`✅ Profile picture found (high-res) for: ${jid}`);
+            console.log(`✅ Profile picture found (high-res) for: ${correctJid}`);
             return highResUrl;
         }
     } catch (error) {
-        console.log(`📸 No high-res for ${jid}:`, error.message);
+        console.log(`📸 No high-res for ${correctJid}:`, error.message);
     }
     
-    // If @lid format fails, try @s.whatsapp.net as fallback
+    // If @s.whatsapp.net fails, try @c.us as fallback
     try {
-        const altJid = jid.replace(/@lid/, '@s.whatsapp.net');
-        if (altJid !== jid) {
-            console.log(`📸 Trying alt format: ${altJid}`);
-            const ppUrl = await sock.profilePictureUrl(altJid, 'preview');
-            if (ppUrl) {
-                console.log(`✅ Profile picture found with alt format`);
-                return ppUrl;
-            }
+        const fallbackJid = `${pureNumber}@c.us`;
+        console.log(`📸 Trying fallback format: ${fallbackJid}`);
+        const ppUrl = await sock.profilePictureUrl(fallbackJid, 'preview');
+        if (ppUrl) {
+            console.log(`✅ Profile picture found with fallback format`);
+            return ppUrl;
         }
     } catch (error) {
         // Ignore
