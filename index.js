@@ -21,26 +21,48 @@ function getUserId(jid) {
 }
 
 // ==================== PROFILE PICTURE FETCHING ====================
+// ==================== FETCH PROFILE PICTURE FOR BUSINESS ====================
 async function fetchProfilePicture(sock, jid) {
-    // Extract the pure number from the JID
     const pureNumber = jid.replace(/@[a-z.]+/g, '');
-    
-    // The CORRECT format for profile pictures
     const correctJid = `${pureNumber}@s.whatsapp.net`;
     
-    console.log(`📸 Fetching profile picture for: ${correctJid}`);
+    console.log(`📸 Fetching profile picture for: ${correctJid} (Business account)`);
     
     try {
+        // Method 1: Standard profilePictureUrl
         const ppUrl = await sock.profilePictureUrl(correctJid, 'preview');
         if (ppUrl) {
-            console.log(`✅ Profile picture found`);
+            console.log(`✅ Profile picture found via standard method`);
             return ppUrl;
         }
     } catch (error) {
-        console.log(`📸 No profile picture: ${error.message}`);
-        // This will be "item-not-found" if the user has no public picture
+        console.log(`📸 Standard method failed: ${error.message}`);
     }
     
+    try {
+        // Method 2: Try with the original JID
+        const ppUrl = await sock.profilePictureUrl(jid, 'preview');
+        if (ppUrl) {
+            console.log(`✅ Profile picture found with original JID`);
+            return ppUrl;
+        }
+    } catch (error) {
+        console.log(`📸 Original JID method failed: ${error.message}`);
+    }
+    
+    // Method 3: For Business accounts, try WhatsApp Web URL pattern
+    try {
+        // Get the user's profile info through presence
+        const presence = await sock.presenceSubscribe(jid);
+        if (presence && presence.profilePicture) {
+            console.log(`✅ Profile picture found via presence`);
+            return presence.profilePicture;
+        }
+    } catch (error) {
+        console.log(`📸 Presence method failed: ${error.message}`);
+    }
+    
+    console.log(`❌ No profile picture available for: ${pureNumber}`);
     return '';
 }
 
