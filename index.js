@@ -9,8 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // ==================== CONFIGURATION ====================
-const API_URL = 'https://worldcup.aramedia.me/api.php'; // Your PHP API endpoint
-const WEB_URL = 'https://worldcup.aramedia.me'; // Your PHP web server
+const API_URL = 'https://aramedia.me/worldcup/api.php'; // Your PHP API endpoint
+const WEB_URL = 'https://aramedia.me/worldcup'; // Your PHP web server
 
 // ==================== API FUNCTIONS ====================
 // Function to create a match in your PHP/MySQL server
@@ -421,7 +421,7 @@ app.get('/', (req, res) => {
     res.send(`
         <h1>✅ WhatsApp Bot is Running!</h1>
         <p><a href="/qr" target="_blank"><b>👉 Click Here to Scan QR Code</b></a></p>
-        <p><a href="https://worldcup.aramedia.me" target="_blank"><b>📊 View Dashboard</b></a></p>
+        <p><a href="https://aramedia.me/worldcup" target="_blank"><b>📊 View Dashboard</b></a></p>
     `);
 });
 
@@ -490,7 +490,7 @@ async function connectToWhatsApp() {
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🌐 Web dashboard: https://worldcup.aramedia.me`);
+    console.log(`🌐 Web dashboard: https://aramedia.me/worldcup`);
 });
 
 // ==================== START BOT ====================
