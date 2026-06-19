@@ -20,51 +20,25 @@ function getUserId(jid) {
     return id;
 }
 
-// ==================== FETCH PROFILE PICTURE FOR BUSINESS ====================
+// ==================== PROFILE PICTURE FETCHING ====================
 async function fetchProfilePicture(sock, jid) {
     const pureNumber = jid.replace(/@[a-z.]+/g, '');
     const correctJid = `${pureNumber}@s.whatsapp.net`;
     
-    console.log(`📸 Fetching profile picture for: ${correctJid} (Business account)`);
+    console.log(`📸 Fetching profile picture for: ${correctJid}`);
     
     try {
-        // Method 1: Standard profilePictureUrl
         const ppUrl = await sock.profilePictureUrl(correctJid, 'preview');
         if (ppUrl) {
-            console.log(`✅ Profile picture found via standard method`);
+            console.log(`✅ Profile picture found`);
             return ppUrl;
         }
     } catch (error) {
-        console.log(`📸 Standard method failed: ${error.message}`);
+        console.log(`📸 No profile picture: ${error.message}`);
     }
     
-    try {
-        // Method 2: Try with the original JID
-        const ppUrl = await sock.profilePictureUrl(jid, 'preview');
-        if (ppUrl) {
-            console.log(`✅ Profile picture found with original JID`);
-            return ppUrl;
-        }
-    } catch (error) {
-        console.log(`📸 Original JID method failed: ${error.message}`);
-    }
-    
-    // Method 3: For Business accounts, try WhatsApp Web URL pattern
-    try {
-        // Get the user's profile info through presence
-        const presence = await sock.presenceSubscribe(jid);
-        if (presence && presence.profilePicture) {
-            console.log(`✅ Profile picture found via presence`);
-            return presence.profilePicture;
-        }
-    } catch (error) {
-        console.log(`📸 Presence method failed: ${error.message}`);
-    }
-    
-    console.log(`❌ No profile picture available for: ${pureNumber}`);
     return '';
 }
-
 
 // ==================== API FUNCTIONS ====================
 async function apiRequest(endpoint, method = 'GET', data = null) {
