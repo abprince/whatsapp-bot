@@ -65,34 +65,6 @@ async function fetchProfilePicture(sock, jid) {
     return '';
 }
 
-// Add this to your handleCommands function
-if (command === '!testpp') {
-    try {
-        // Test with your own number (the bot owner)
-        const yourNumber = '919108949369'; // Your actual number
-        const testJid = `${yourNumber}@s.whatsapp.net`;
-        
-        console.log(`📸 Testing with owner's number: ${testJid}`);
-        const ppUrl = await sock.profilePictureUrl(testJid, 'preview');
-        
-        if (ppUrl) {
-            await sock.sendMessage(from, { 
-                text: `✅ Your profile picture is accessible!\n\nURL: ${ppUrl.substring(0, 60)}...` 
-            });
-            console.log(`✅ Owner profile picture found: ${ppUrl}`);
-        } else {
-            await sock.sendMessage(from, { 
-                text: `❌ No profile picture found for your number.` 
-            });
-        }
-    } catch (error) {
-        await sock.sendMessage(from, { 
-            text: `❌ Error: ${error.message}\n\nThis means your profile picture is not publicly accessible. Check WhatsApp Settings → Privacy → Profile Photo.` 
-        });
-        console.log(`❌ Owner profile picture error: ${error.message}`);
-    }
-    return;
-}
 
 // ==================== API FUNCTIONS ====================
 async function apiRequest(endpoint, method = 'GET', data = null) {
