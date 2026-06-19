@@ -20,7 +20,6 @@ function getUserId(jid) {
     return id;
 }
 
-// ==================== PROFILE PICTURE FETCHING ====================
 // ==================== FETCH PROFILE PICTURE FOR BUSINESS ====================
 async function fetchProfilePicture(sock, jid) {
     const pureNumber = jid.replace(/@[a-z.]+/g, '');
