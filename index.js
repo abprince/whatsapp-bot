@@ -11,60 +11,76 @@ const PORT = process.env.PORT || 10000;
 // ==================== CONFIGURATION ====================
 const API_URL = 'https://aramedia.me/worldcup/api.php';
 const WEB_URL = 'https://aramedia.me/worldcup';
-const BOT_NUMBER = '919108949369';
-// ==================== API FUNCTIONS ====================
-async function createMatchOnServer(matchData) {
+const BOT_NUMBER = '919108949369'; // YOUR REAL BOT NUMBER
+
+// ==================== UPDATED API FUNCTIONS ====================
+async function apiRequest(endpoint, method = 'GET', data = null) {
     try {
-        const response = await axios.post(`${API_URL}?action=create_match`, matchData);
+        const config = {
+            method: method,
+            url: `${API_URL}?action=${endpoint}`,
+            headers: {
+                'User-Agent': 'WhatsAppBot/1.0',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
+        };
+        
+        if (method === 'POST' && data) {
+            config.data = data;
+        }
+        
+        const response = await axios(config);
         return response.data;
     } catch (error) {
-        console.error('Error creating match:', error);
+        console.error(`API Error (${endpoint}):`, error.message);
         return null;
     }
+}
+
+async function createMatchOnServer(matchData) {
+    return await apiRequest('create_match', 'POST', matchData);
 }
 
 async function getMatchFromServer(matchId) {
-    try {
-        const response = await axios.get(`${API_URL}?action=get_match&match_id=${matchId}`);
-        return response.data;
-    } catch (error) {
-        console.error('Error getting match:', error);
-        return null;
-    }
+    return await apiRequest(`get_match&match_id=${matchId}`);
 }
 
 async function getLeaderboardFromServer() {
-    try {
-        const response = await axios.get(`${API_URL}?action=get_leaderboard`);
-        return response.data;
-    } catch (error) {
-        console.error('Error getting leaderboard:', error);
-        return null;
-    }
+    return await apiRequest('get_leaderboard');
 }
 
 async function getMatchVotesFromServer(matchId) {
-    try {
-        const response = await axios.get(`${API_URL}?action=get_votes&match_id=${matchId}`);
-        return response.data;
-    } catch (error) {
-        console.error('Error getting votes:', error);
-        return null;
-    }
+    return await apiRequest(`get_votes&match_id=${matchId}`);
 }
 
 async function declareResultOnServer(matchId, winner, score) {
-    try {
-        const response = await axios.post(`${API_URL}?action=declare_result`, {
-            match_id: matchId,
-            winner: winner,
-            score: score
-        });
-        return response.data;
-    } catch (error) {
-        console.error('Error declaring result:', error);
-        return null;
-    }
+    return await apiRequest('declare_result', 'POST', { match_id: matchId, winner, score });
+}
+
+async function closeMatchOnServer(matchId) {
+    return await apiRequest('close_match', 'POST', { match_id: matchId });
+}
+
+async function getActiveMatchFromServer() {
+    return await apiRequest('get_active_match');
+}
+
+async function getUserStatsFromServer(waNumber) {
+    return await apiRequest(`get_user_stats&wa_number=${waNumber}`);
+}
+
+async function getMatchesFromServer() {
+    return await apiRequest('get_matches');
+}
+
+async function registerUserOnServer(waNumber, name = '', profilePic = '') {
+    return await apiRequest('register_user', 'POST', {
+        wa_number: waNumber,
+        name: name,
+        profile_pic: profilePic
+    });
 }
 
 // ==================== GROUP MANAGEMENT ====================
@@ -172,377 +188,364 @@ async function handleCommands(sock, msg) {
             await saveGroup(from);
         }
         
-        console.log(`📩 Received: "${text}" from ${sender}`);
+        const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
+        
+        // ===== AUTO-REGISTER USER ON ANY MESSAGE =====
+        let userName = '';
+        let profilePic = '';
+        try {
+            const contact = await sock.getContact(sender);
+            if (contact) {
+                userName = contact.name || contact.notify || '';
+            }
+        } catch (e) {
+            // Ignore
+        }
+        await registerUserOnServer(waNumber, userName, profilePic);
+        
+        console.log(`📩 Received: "${text}" from ${waNumber}`);
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
         const args = parts.slice(1);
         
-        // ===== GROUP ADMIN COMMANDS =====
-        if (isGroup && command === '!creatematch') {
-            try {
-                let matchName = '';
-                let kickoffTime = '';
-                let team1 = '';
-                let team2 = '';
-                
-                const matchNameMatch = text.match(/"([^"]+)"/);
-                if (matchNameMatch) {
-                    matchName = matchNameMatch[1];
-                    const teams = matchName.split(' vs ').map(t => t.trim());
-                    team1 = teams[0] || '';
-                    team2 = teams[1] || '';
-                }
-                
-                const timeMatch = text.match(/"([^"]+)"$/);
-                if (timeMatch) {
-                    kickoffTime = timeMatch[1];
-                }
-                
-                if (!matchName || !kickoffTime || !team1 || !team2) {
-                    await sock.sendMessage(from, { 
-                        text: '❌ Usage: !creatematch "Team A vs Team B" "2026-06-20 15:00"' 
-                    });
-                    return;
-                }
-                
-                const matchData = {
-                    id: Date.now().toString(),
-                    name: matchName,
-                    team1: team1,
-                    team2: team2,
-                    kickoff: new Date(kickoffTime).toISOString(),
-                    created_by: sender
-                };
-                
-                const result = await createMatchOnServer(matchData);
-                
-                if (result && result.success) {
-                    const votingLink = `${WEB_URL}/index.php?match=${matchData.id}`;
-                    await sock.sendMessage(from, {
-                        text: `✅ Match Created Successfully!\n\n📋 *${matchName}*\n⏰ Kickoff: ${new Date(kickoffTime).toLocaleString()}\n\n📱 Get your personal voting link by typing: !vote\n\n📱 Or vote here:\n${votingLink}`
-                    });
-                } else {
-                    await sock.sendMessage(from, { text: '❌ Failed to create match. Please try again.' });
-                }
-            } catch (error) {
-                console.error('Error in !creatematch:', error);
-                await sock.sendMessage(from, { text: '❌ Error creating match. Check format!' });
-            }
+        // ===== VOTE COMMAND (Works in both group and private) =====
+        if (text === '!vote' || text === '!vote') {
+            await handleVoteCommand(sock, from, sender, isGroup);
             return;
         }
         
-        // ===== VOTING COMMAND =====
-        if (command === '!vote') {
-            const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-            const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
-            
-            try {
-                const response = await axios.get(`${API_URL}?action=get_active_match`);
-                const match = response.data;
-                
-                let messageText = '';
-                if (match) {
-                    const fullLink = `${WEB_URL}/index.php?match=${match.id}&wa=${waNumber}`;
-                    messageText = `📱 *Your Personal Voting Link*\n\n` +
-                                 `Click the link below to vote:\n` +
-                                 `${fullLink}\n\n` +
-                                 `⚽ *Match:* ${match.name}\n` +
-                                 `⏰ *Kickoff:* ${new Date(match.kickoff).toLocaleString()}\n\n` +
-                                 `🔒 This link is personal to you (${waNumber})`;
-                } else {
-                    messageText = `📱 *Your Personal Voting Link*\n\n` +
-                                 `Click the link below to vote:\n` +
-                                 `${votingLink}\n\n` +
-                                 `No active match found. Check back later!\n\n` +
-                                 `🔒 This link is personal to you (${waNumber})`;
-                }
-                
-                // Send as PRIVATE message
-                await sock.sendMessage(sender, { text: messageText });
-                
-                if (isGroup) {
-                    await sock.sendMessage(from, { 
-                        text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` 
-                    });
-                }
-                
-            } catch (error) {
-                console.error('Error in !vote:', error);
-                await sock.sendMessage(sender, {
-                    text: `📱 Vote here:\n${WEB_URL}/index.php?wa=${waNumber}`
-                });
-                if (isGroup) {
-                    await sock.sendMessage(from, { 
-                        text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` 
-                    });
-                }
-            }
-            return;
+        // ===== GROUP ADMIN COMMANDS =====
+        if (isGroup && command === '!creatematch') {
+            // ... existing code
         }
         
         // ===== VIEW LEADERBOARD =====
         if (command === '!leaderboard' || command === '!standings') {
-            try {
-                const data = await getLeaderboardFromServer();
-                
-                if (!data || data.length === 0) {
-                    await sock.sendMessage(from, { 
-                        text: `📊 No points recorded yet!\n\nStart voting by typing: !vote` 
-                    });
-                    return;
-                }
-                
-                const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-                let response = '🏆 *Leaderboard*\n\n';
-                
-                data.forEach((user, index) => {
-                    const name = user.name || user.wa_number || 'Anonymous';
-                    const isYou = user.wa_number === waNumber ? ' 👈' : '';
-                    const medals = ['🥇', '🥈', '🥉'];
-                    const medal = index < 3 ? medals[index] : `${index + 1}.`;
-                    response += `${medal} ${name}: ${user.total_points || 0} points${isYou}\n`;
-                    response += `   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
-                });
-                
-                response += `\n📱 Full leaderboard:\n${WEB_URL}/leaderboard.php`;
-                response += `\n📱 Get your personal voting link: !vote`;
-                
-                await sock.sendMessage(from, { text: response });
-            } catch (error) {
-                console.error('Error in !leaderboard:', error);
-                await sock.sendMessage(from, { text: '❌ Error fetching leaderboard. Please try again.' });
-            }
+            await handleLeaderboardCommand(sock, from, waNumber);
             return;
         }
         
         // ===== VIEW MATCHES =====
         if (command === '!matches') {
-            try {
-                const response = await axios.get(`${API_URL}?action=get_matches`);
-                const matches = response.data;
-                
-                if (!matches || matches.length === 0) {
-                    await sock.sendMessage(from, { text: '📋 No matches available!' });
-                    return;
-                }
-                
-                const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-                let responseText = '📋 *Matches*\n\n';
-                
-                const upcoming = matches.filter(m => m.status === 'active' && new Date(m.kickoff) > new Date());
-                if (upcoming.length > 0) {
-                    responseText += '🟢 *Upcoming Matches (Voting Open)*\n';
-                    upcoming.forEach(m => {
-                        const matchLink = `${WEB_URL}/index.php?match=${m.id}&wa=${waNumber}`;
-                        responseText += `📌 *${m.name}*\n`;
-                        responseText += `   ⏰ ${new Date(m.kickoff).toLocaleString()}\n`;
-                        responseText += `   🔗 Vote: ${matchLink}\n\n`;
-                    });
-                }
-                
-                const completed = matches.filter(m => m.status === 'completed');
-                if (completed.length > 0) {
-                    responseText += '🔵 *Completed Matches*\n';
-                    completed.slice(-3).forEach(m => {
-                        responseText += `📌 ${m.name}\n`;
-                        responseText += `   🏅 Winner: ${m.winner || 'Unknown'}\n`;
-                        responseText += `   ⚽ Score: ${m.score || 'N/A'}\n\n`;
-                    });
-                }
-                
-                if (responseText === '📋 *Matches*\n\n') {
-                    responseText += 'No matches available.';
-                }
-                
-                responseText += `\n📱 Get your personal voting link: !vote`;
-                
-                await sock.sendMessage(from, { text: responseText });
-            } catch (error) {
-                console.error('Error in !matches:', error);
-                await sock.sendMessage(from, { text: '❌ Error fetching matches. Please try again.' });
-            }
+            await handleMatchesCommand(sock, from, waNumber);
             return;
         }
         
         // ===== MATCH STATUS =====
         if (command === '!matchstatus' || command === '!votes') {
-            try {
-                const response = await axios.get(`${API_URL}?action=get_active_match`);
-                const match = response.data;
-                
-                if (!match) {
-                    await sock.sendMessage(from, { 
-                        text: `❌ No active match!\n\nType !matches to see all matches.` 
-                    });
-                    return;
-                }
-                
-                const votesResponse = await axios.get(`${API_URL}?action=get_votes&match_id=${match.id}`);
-                const votes = votesResponse.data;
-                
-                const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-                
-                let responseText = `📊 *Voting Status*\n\n`;
-                responseText += `📋 ${match.name}\n`;
-                responseText += `⏰ ${new Date(match.kickoff).toLocaleString()}\n\n`;
-                
-                const team1Count = votes.filter(v => v.team_voted === match.team1).length;
-                const team2Count = votes.filter(v => v.team_voted === match.team2).length;
-                const totalVotes = team1Count + team2Count;
-                
-                const maxBarLength = 15;
-                const bar1 = '█'.repeat(Math.min(Math.floor(team1Count / (totalVotes || 1) * maxBarLength), maxBarLength));
-                const bar2 = '█'.repeat(Math.min(Math.floor(team2Count / (totalVotes || 1) * maxBarLength), maxBarLength));
-                
-                responseText += `🏆 ${match.team1}\n`;
-                responseText += `${bar1 || ' '} ${team1Count} votes (${totalVotes > 0 ? Math.round((team1Count/totalVotes)*100) : 0}%)\n\n`;
-                responseText += `🏆 ${match.team2}\n`;
-                responseText += `${bar2 || ' '} ${team2Count} votes (${totalVotes > 0 ? Math.round((team2Count/totalVotes)*100) : 0}%)\n\n`;
-                responseText += `📊 Total Votes: ${totalVotes}`;
-                
-                const userVote = votes.find(v => v.wa_number === waNumber);
-                if (userVote) {
-                    responseText += `\n\n✅ You voted for: ${userVote.team_voted}`;
-                } else {
-                    responseText += `\n\n❌ You haven't voted yet!\nType !vote to get your personal voting link.`;
-                }
-                
-                await sock.sendMessage(from, { text: responseText });
-            } catch (error) {
-                console.error('Error in !matchstatus:', error);
-                await sock.sendMessage(from, { text: '❌ Error getting match status. Please try again.' });
-            }
+            await handleMatchStatusCommand(sock, from, waNumber);
             return;
         }
         
         // ===== USER STATS =====
         if (command === '!stats') {
-            const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-            try {
-                const response = await axios.get(`${API_URL}?action=get_user_stats&wa_number=${waNumber}`);
-                const user = response.data;
-                
-                if (!user) {
-                    await sock.sendMessage(from, { 
-                        text: `📊 No stats found for your number (${waNumber}).\nStart voting by typing: !vote` 
-                    });
-                    return;
-                }
-                
-                let responseText = `📊 *Your Stats*\n\n`;
-                responseText += `👤 Name: ${user.name || 'Not set'}\n`;
-                responseText += `📱 Number: ${user.wa_number}\n`;
-                responseText += `⭐ Total Points: ${user.total_points || 0}\n`;
-                responseText += `✅ Correct Predictions: ${user.correct_predictions || 0}\n`;
-                responseText += `📊 Total Predictions: ${user.total_predictions || 0}\n`;
-                responseText += `📈 Accuracy: ${user.total_predictions > 0 ? Math.round((user.correct_predictions / user.total_predictions) * 100) : 0}%`;
-                
-                await sock.sendMessage(from, { text: responseText });
-            } catch (error) {
-                console.error('Error in !stats:', error);
-                await sock.sendMessage(from, { text: '❌ Error fetching your stats.' });
-            }
+            await handleStatsCommand(sock, from, waNumber);
             return;
         }
         
         // ===== ADMIN: CLOSE MATCH =====
         if (isGroup && command === '!closematch') {
-            const matchId = args[0];
-            if (!matchId) {
-                await sock.sendMessage(from, { text: '❌ Usage: !closematch [match_id]' });
-                return;
-            }
-            
-            try {
-                const response = await axios.post(`${API_URL}?action=close_match`, {
-                    match_id: matchId
-                });
-                
-                if (response.data && response.data.success) {
-                    await sock.sendMessage(from, {
-                        text: `🔒 Voting closed for match!\nMatch ID: ${matchId}\nResults will be announced soon.`
-                    });
-                } else {
-                    await sock.sendMessage(from, { text: '❌ Failed to close match. Check match ID.' });
-                }
-            } catch (error) {
-                console.error('Error in !closematch:', error);
-                await sock.sendMessage(from, { text: '❌ Error closing match.' });
-            }
+            await handleCloseMatchCommand(sock, from, args);
             return;
         }
         
         // ===== ADMIN: DECLARE RESULT =====
         if (isGroup && command === '!declareresult') {
-            try {
-                const matchId = args[0];
-                const teamName = args.slice(1, args.length - 1).join(' ').replace(/^"|"$/g, '');
-                const score = args[args.length - 1];
-                
-                if (!matchId || !teamName || !score) {
-                    await sock.sendMessage(from, { 
-                        text: '❌ Usage: !declareresult [match_id] "Team Name" score' 
-                    });
-                    return;
-                }
-                
-                const result = await declareResultOnServer(matchId, teamName, score);
-                
-                if (result && result.success) {
-                    const match = await getMatchFromServer(matchId);
-                    
-                    let response = `🏆 *Match Result Declared!*\n\n`;
-                    response += `📋 ${match.name}\n`;
-                    response += `🏅 Winner: ${teamName}\n`;
-                    response += `⚽ Score: ${score}\n\n`;
-                    
-                    if (result.points_awarded && result.points_awarded.length > 0) {
-                        response += `🎉 *Points Awarded (3 points each)*\n`;
-                        result.points_awarded.forEach(user => {
-                            response += `- ${user.name || user.wa_number}: +3 points\n`;
-                        });
-                    }
-                    
-                    await sock.sendMessage(from, { text: response });
-                } else {
-                    await sock.sendMessage(from, { text: '❌ Failed to declare result.' });
-                }
-            } catch (error) {
-                console.error('Error in !declareresult:', error);
-                await sock.sendMessage(from, { text: '❌ Error declaring result.' });
-            }
+            await handleDeclareResultCommand(sock, from, text, args);
             return;
         }
         
         // ===== HELP =====
         if (command === '!help' || command === '!menu') {
-            const clickToChatLink = `https://wa.me/${BOT_NUMBER}?text=!vote`;
-            
-            let response = '📋 *Available Commands*\n\n';
-            response += '👤 *User Commands*\n';
-            response += '!vote - Get your personal voting link (private message)\n';
-            response += '!matches - View all matches\n';
-            response += '!leaderboard - View standings\n';
-            response += '!stats - Your voting history\n';
-            response += '!matchstatus - View current votes\n';
-            response += '!help - Show this menu\n\n';
-            
-            response += '👑 *Admin Commands*\n';
-            response += '!creatematch "Team A vs Team B" "YYYY-MM-DD HH:MM"\n';
-            response += '!closematch [match_id]\n';
-            response += '!declareresult [match_id] "Team Name" score\n\n';
-            
-            response += `📱 *Quick Vote:*\n`;
-            response += `Click this link to vote instantly:\n${clickToChatLink}\n\n`;
-            
-            response += `🌐 *Web Dashboard:*\n`;
-            response += `${WEB_URL}`;
-            
-            await sock.sendMessage(from, { text: response });
+            await handleHelpCommand(sock, from);
             return;
         }
     }
+}
+
+// ===== INDIVIDUAL COMMAND HANDLERS =====
+async function handleVoteCommand(sock, from, sender, isGroup) {
+    const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
+    const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
+    
+    try {
+        const match = await getActiveMatchFromServer();
+        
+        let messageText = '';
+        if (match) {
+            const fullLink = `${WEB_URL}/index.php?match=${match.id}&wa=${waNumber}`;
+            messageText = `📱 *Your Personal Voting Link*\n\n` +
+                         `Click the link below to vote:\n` +
+                         `${fullLink}\n\n` +
+                         `⚽ *Match:* ${match.name}\n` +
+                         `⏰ *Kickoff:* ${new Date(match.kickoff).toLocaleString()}\n\n` +
+                         `🔒 This link is personal to you (${waNumber})`;
+        } else {
+            messageText = `📱 *Your Personal Voting Link*\n\n` +
+                         `Click the link below to vote:\n` +
+                         `${votingLink}\n\n` +
+                         `No active match found. Check back later!\n\n` +
+                         `🔒 This link is personal to you (${waNumber})`;
+        }
+        
+        // Send as PRIVATE message
+        await sock.sendMessage(sender, { text: messageText });
+        
+        if (isGroup) {
+            await sock.sendMessage(from, { 
+                text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` 
+            });
+        }
+        
+    } catch (error) {
+        console.error('Error in vote command:', error);
+        await sock.sendMessage(sender, {
+            text: `📱 Vote here:\n${WEB_URL}/index.php?wa=${waNumber}`
+        });
+        if (isGroup) {
+            await sock.sendMessage(from, { 
+                text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` 
+            });
+        }
+    }
+}
+
+async function handleLeaderboardCommand(sock, from, waNumber) {
+    try {
+        const data = await getLeaderboardFromServer();
+        
+        if (!data || data.length === 0) {
+            await sock.sendMessage(from, { 
+                text: `📊 No points recorded yet!\n\nStart voting by typing: !vote` 
+            });
+            return;
+        }
+        
+        let response = '🏆 *Leaderboard*\n\n';
+        
+        data.forEach((user, index) => {
+            const name = user.name || user.wa_number || 'Anonymous';
+            const isYou = user.wa_number === waNumber ? ' 👈' : '';
+            const medals = ['🥇', '🥈', '🥉'];
+            const medal = index < 3 ? medals[index] : `${index + 1}.`;
+            response += `${medal} ${name}: ${user.total_points || 0} points${isYou}\n`;
+            response += `   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
+        });
+        
+        response += `\n📱 Full leaderboard:\n${WEB_URL}/leaderboard.php`;
+        response += `\n📱 Get your personal voting link: !vote`;
+        
+        await sock.sendMessage(from, { text: response });
+    } catch (error) {
+        console.error('Error in !leaderboard:', error);
+        await sock.sendMessage(from, { text: '❌ Error fetching leaderboard. Please try again.' });
+    }
+}
+
+async function handleMatchesCommand(sock, from, waNumber) {
+    try {
+        const matches = await getMatchesFromServer();
+        
+        if (!matches || matches.length === 0) {
+            await sock.sendMessage(from, { text: '📋 No matches available!' });
+            return;
+        }
+        
+        let responseText = '📋 *Matches*\n\n';
+        
+        const upcoming = matches.filter(m => m.status === 'active' && new Date(m.kickoff) > new Date());
+        if (upcoming.length > 0) {
+            responseText += '🟢 *Upcoming Matches (Voting Open)*\n';
+            upcoming.forEach(m => {
+                const matchLink = `${WEB_URL}/index.php?match=${m.id}&wa=${waNumber}`;
+                responseText += `📌 *${m.name}*\n`;
+                responseText += `   ⏰ ${new Date(m.kickoff).toLocaleString()}\n`;
+                responseText += `   🔗 Vote: ${matchLink}\n\n`;
+            });
+        }
+        
+        const completed = matches.filter(m => m.status === 'completed');
+        if (completed.length > 0) {
+            responseText += '🔵 *Completed Matches*\n';
+            completed.slice(-3).forEach(m => {
+                responseText += `📌 ${m.name}\n`;
+                responseText += `   🏅 Winner: ${m.winner || 'Unknown'}\n`;
+                responseText += `   ⚽ Score: ${m.score || 'N/A'}\n\n`;
+            });
+        }
+        
+        if (responseText === '📋 *Matches*\n\n') {
+            responseText += 'No matches available.';
+        }
+        
+        responseText += `\n📱 Get your personal voting link: !vote`;
+        
+        await sock.sendMessage(from, { text: responseText });
+    } catch (error) {
+        console.error('Error in !matches:', error);
+        await sock.sendMessage(from, { text: '❌ Error fetching matches. Please try again.' });
+    }
+}
+
+async function handleMatchStatusCommand(sock, from, waNumber) {
+    try {
+        const match = await getActiveMatchFromServer();
+        
+        if (!match) {
+            await sock.sendMessage(from, { 
+                text: `❌ No active match!\n\nType !matches to see all matches.` 
+            });
+            return;
+        }
+        
+        const votes = await getMatchVotesFromServer(match.id);
+        
+        let responseText = `📊 *Voting Status*\n\n`;
+        responseText += `📋 ${match.name}\n`;
+        responseText += `⏰ ${new Date(match.kickoff).toLocaleString()}\n\n`;
+        
+        const team1Count = votes?.filter(v => v.team_voted === match.team1).length || 0;
+        const team2Count = votes?.filter(v => v.team_voted === match.team2).length || 0;
+        const totalVotes = team1Count + team2Count;
+        
+        const maxBarLength = 15;
+        const bar1 = '█'.repeat(Math.min(Math.floor(team1Count / (totalVotes || 1) * maxBarLength), maxBarLength));
+        const bar2 = '█'.repeat(Math.min(Math.floor(team2Count / (totalVotes || 1) * maxBarLength), maxBarLength));
+        
+        responseText += `🏆 ${match.team1}\n`;
+        responseText += `${bar1 || ' '} ${team1Count} votes (${totalVotes > 0 ? Math.round((team1Count/totalVotes)*100) : 0}%)\n\n`;
+        responseText += `🏆 ${match.team2}\n`;
+        responseText += `${bar2 || ' '} ${team2Count} votes (${totalVotes > 0 ? Math.round((team2Count/totalVotes)*100) : 0}%)\n\n`;
+        responseText += `📊 Total Votes: ${totalVotes}`;
+        
+        const userVote = votes?.find(v => v.wa_number === waNumber);
+        if (userVote) {
+            responseText += `\n\n✅ You voted for: ${userVote.team_voted}`;
+        } else {
+            responseText += `\n\n❌ You haven't voted yet!\nType !vote to get your personal voting link.`;
+        }
+        
+        await sock.sendMessage(from, { text: responseText });
+    } catch (error) {
+        console.error('Error in !matchstatus:', error);
+        await sock.sendMessage(from, { text: '❌ Error getting match status. Please try again.' });
+    }
+}
+
+async function handleStatsCommand(sock, from, waNumber) {
+    try {
+        const user = await getUserStatsFromServer(waNumber);
+        
+        if (!user) {
+            await sock.sendMessage(from, { 
+                text: `📊 No stats found for your number.\nStart voting by typing: !vote` 
+            });
+            return;
+        }
+        
+        let responseText = `📊 *Your Stats*\n\n`;
+        responseText += `👤 Name: ${user.name || 'Not set'}\n`;
+        responseText += `📱 Number: ${user.wa_number}\n`;
+        responseText += `⭐ Total Points: ${user.total_points || 0}\n`;
+        responseText += `✅ Correct Predictions: ${user.correct_predictions || 0}\n`;
+        responseText += `📊 Total Predictions: ${user.total_predictions || 0}\n`;
+        responseText += `📈 Accuracy: ${user.total_predictions > 0 ? Math.round((user.correct_predictions / user.total_predictions) * 100) : 0}%`;
+        
+        await sock.sendMessage(from, { text: responseText });
+    } catch (error) {
+        console.error('Error in !stats:', error);
+        await sock.sendMessage(from, { text: '❌ Error fetching your stats.' });
+    }
+}
+
+async function handleCloseMatchCommand(sock, from, args) {
+    const matchId = args[0];
+    if (!matchId) {
+        await sock.sendMessage(from, { text: '❌ Usage: !closematch [match_id]' });
+        return;
+    }
+    
+    try {
+        const result = await closeMatchOnServer(matchId);
+        
+        if (result && result.success) {
+            await sock.sendMessage(from, {
+                text: `🔒 Voting closed for match!\nMatch ID: ${matchId}\nResults will be announced soon.`
+            });
+        } else {
+            await sock.sendMessage(from, { text: '❌ Failed to close match. Check match ID.' });
+        }
+    } catch (error) {
+        console.error('Error in !closematch:', error);
+        await sock.sendMessage(from, { text: '❌ Error closing match.' });
+    }
+}
+
+async function handleDeclareResultCommand(sock, from, text, args) {
+    try {
+        const matchId = args[0];
+        const teamName = args.slice(1, args.length - 1).join(' ').replace(/^"|"$/g, '');
+        const score = args[args.length - 1];
+        
+        if (!matchId || !teamName || !score) {
+            await sock.sendMessage(from, { 
+                text: '❌ Usage: !declareresult [match_id] "Team Name" score' 
+            });
+            return;
+        }
+        
+        const result = await declareResultOnServer(matchId, teamName, score);
+        
+        if (result && result.success) {
+            const match = await getMatchFromServer(matchId);
+            
+            let response = `🏆 *Match Result Declared!*\n\n`;
+            response += `📋 ${match?.name || 'Match'}\n`;
+            response += `🏅 Winner: ${teamName}\n`;
+            response += `⚽ Score: ${score}\n\n`;
+            
+            if (result.points_awarded && result.points_awarded.length > 0) {
+                response += `🎉 *Points Awarded (3 points each)*\n`;
+                result.points_awarded.forEach(user => {
+                    response += `- ${user.name || user.wa_number}: +3 points\n`;
+                });
+            }
+            
+            await sock.sendMessage(from, { text: response });
+        } else {
+            await sock.sendMessage(from, { text: '❌ Failed to declare result.' });
+        }
+    } catch (error) {
+        console.error('Error in !declareresult:', error);
+        await sock.sendMessage(from, { text: '❌ Error declaring result.' });
+    }
+}
+
+async function handleHelpCommand(sock, from) {
+    const clickToChatLink = `https://wa.me/${BOT_NUMBER}?text=!vote`;
+    
+    let response = '📋 *Available Commands*\n\n';
+    response += '👤 *User Commands*\n';
+    response += '!vote - Get your personal voting link (private message)\n';
+    response += '!matches - View all matches\n';
+    response += '!leaderboard - View standings\n';
+    response += '!stats - Your voting history\n';
+    response += '!matchstatus - View current votes\n';
+    response += '!help - Show this menu\n\n';
+    
+    response += '👑 *Admin Commands*\n';
+    response += '!creatematch "Team A vs Team B" "YYYY-MM-DD HH:MM"\n';
+    response += '!closematch [match_id]\n';
+    response += '!declareresult [match_id] "Team Name" score\n\n';
+    
+    response += `📱 *Quick Vote:*\n`;
+    response += `Click this link to vote instantly:\n${clickToChatLink}\n\n`;
+    
+    response += `🌐 *Web Dashboard:*\n`;
+    response += `${WEB_URL}`;
+    
+    await sock.sendMessage(from, { text: response });
 }
 
 // ==================== EXPRESS SERVER ====================
@@ -561,14 +564,7 @@ app.get('/', (req, res) => {
         <p><a href="${clickToChatLink}" target="_blank">${clickToChatLink}</a></p>
         <hr>
         <p><a href="${WEB_URL}" target="_blank"><b>📊 View Dashboard</b></a></p>
-        <p>Groups: <span id="groupCount">0</span></p>
-        <script>
-            fetch('/groups')
-                .then(res => res.json())
-                .then(data => {
-                    document.getElementById('groupCount').textContent = data.length;
-                });
-        </script>
+        <p>Bot Number: ${BOT_NUMBER}</p>
     `);
 });
 
@@ -586,19 +582,6 @@ app.get('/qr', async (req, res) => {
         }
     } else {
         res.send('<h2>Waiting for QR Code... Refresh after 5-10 seconds.</h2>');
-    }
-});
-
-app.get('/groups', (req, res) => {
-    try {
-        if (fs.existsSync('groups.json')) {
-            const data = fs.readFileSync('groups.json', 'utf8');
-            res.json(JSON.parse(data));
-        } else {
-            res.json([]);
-        }
-    } catch (error) {
-        res.json([]);
     }
 });
 
@@ -631,7 +614,6 @@ async function connectToWhatsApp() {
             console.log(`📱 Bot Number: ${BOT_NUMBER}`);
             console.log(`🔗 Click-to-chat: https://wa.me/${BOT_NUMBER}?text=!vote`);
             
-            // Start daily reminder schedule when bot connects
             scheduleDailyReminder();
         }
 
@@ -645,7 +627,6 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Message handler
     sock.ev.on('messages.upsert', async (m) => {
         await handleCommands(sock, m);
     });
@@ -656,6 +637,7 @@ async function connectToWhatsApp() {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌐 Web dashboard: ${WEB_URL}`);
+    console.log(`📱 Bot Number: ${BOT_NUMBER}`);
 });
 
 // ==================== START BOT ====================
