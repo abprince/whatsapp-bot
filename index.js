@@ -11,22 +11,118 @@ const PORT = process.env.PORT || 10000;
 // ==================== CONFIGURATION ====================
 const API_URL = 'https://aramedia.me/worldcup/api.php';
 const WEB_URL = 'https://aramedia.me/worldcup';
-const BOT_NUMBER = '919108949369'; // YOUR REAL BOT NUMBER
+const BOT_NUMBER = '919108949369';
+
+// ==================== CONTACT CACHE ====================
+// Store contact info to avoid repeated API calls
+const contactCache = new Map();
 
 // ==================== HELPER FUNCTIONS ====================
-function cleanWaNumber(sender) {
-    // Remove any suffix like @c.us, @g.us, @lid, @s.whatsapp.net
-    let number = sender.replace(/@[a-z.]+/g, '');
+function extractPhoneNumber(jid) {
+    // Try to extract phone number from various JID formats
+    // @c.us, @s.whatsapp.net, @lid, @g.us, etc.
+    
+    // If it's already a clean number, return it
+    if (/^[0-9]+$/.test(jid)) {
+        return jid;
+    }
+    
+    // Remove any suffix
+    let number = jid.replace(/@[a-z.]+/g, '');
     
     // Remove any non-digit characters
     number = number.replace(/\D/g, '');
     
-    // If we got a 10-digit number, assume India (+91) as default
+    // If number is 10 digits, assume India (+91)
     if (number.length === 10) {
         number = '91' + number;
     }
     
     return number;
+}
+
+async function getUserContactInfo(sock, jid) {
+    try {
+        // Check cache first
+        if (contactCache.has(jid)) {
+            return contactCache.get(jid);
+        }
+        
+        // Initialize contact info
+        let contactInfo = {
+            wa_number: extractPhoneNumber(jid),
+            name: '',
+            profile_pic: '',
+            raw_jid: jid,
+            phoneNumber: '',
+            notify: '',
+            pushName: ''
+        };
+        
+        // Method 1: Try to get contact from socket
+        try {
+            const contact = await sock.getContact(jid);
+            if (contact) {
+                contactInfo.name = contact.name || contact.notify || '';
+                contactInfo.notify = contact.notify || '';
+                contactInfo.phoneNumber = contact.phoneNumber || '';
+                
+                // If we got a phoneNumber, use it
+                if (contact.phoneNumber) {
+                    const cleanNum = extractPhoneNumber(contact.phoneNumber);
+                    if (cleanNum.length >= 10) {
+                        contactInfo.wa_number = cleanNum;
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(`Could not get contact via getContact: ${e.message}`);
+        }
+        
+        // Method 2: Try to get profile picture
+        try {
+            const ppUrl = await sock.profilePictureUrl(jid, 'preview');
+            if (ppUrl) {
+                contactInfo.profile_pic = ppUrl;
+            }
+        } catch (e) {
+            // Profile picture not available (private or not set)
+            console.log(`No profile picture for ${jid}: ${e.message}`);
+        }
+        
+        // Method 3: Try to get presence info (might give us more details)
+        try {
+            const presence = await sock.presenceSubscribe(jid);
+            // Presence might give us additional info
+        } catch (e) {
+            // Ignore
+        }
+        
+        // Method 4: If we still don't have a name, try to extract from the JID
+        if (!contactInfo.name) {
+            // Try to get the user's display name from the phone number
+            const phoneNumber = extractPhoneNumber(jid);
+            // Sometimes the number itself is the best we can do
+            contactInfo.name = phoneNumber;
+        }
+        
+        // Cache the result
+        contactCache.set(jid, contactInfo);
+        
+        return contactInfo;
+    } catch (error) {
+        console.error(`Error getting contact info for ${jid}:`, error);
+        // Return basic info with extracted number
+        return {
+            wa_number: extractPhoneNumber(jid),
+            name: extractPhoneNumber(jid),
+            profile_pic: '',
+            raw_jid: jid,
+            phoneNumber: '',
+            notify: '',
+            pushName: ''
+        };
+    }
 }
 
 // ==================== API FUNCTIONS ====================
@@ -199,37 +295,29 @@ async function handleCommands(sock, msg) {
         const sender = msgData.key.participant || msgData.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         
-        // Clean the number
-        const waNumber = cleanWaNumber(sender);
-        
-        console.log(`📩 Received: "${text}" from ${waNumber} (raw: ${sender})`);
-        
         // Save group if it's a group message
         if (isGroup) {
             await saveGroup(from);
         }
         
-        // ===== AUTO-REGISTER USER WITH CLEAN NUMBER =====
-        let userName = '';
-        let profilePic = '';
-        try {
-            const contact = await sock.getContact(sender);
-            if (contact) {
-                userName = contact.name || contact.notify || '';
-            }
-        } catch (e) {
-            // Ignore
-        }
+        // ===== GET USER CONTACT INFO =====
+        const contactInfo = await getUserContactInfo(sock, sender);
+        const waNumber = contactInfo.wa_number;
+        const userName = contactInfo.name || contactInfo.notify || '';
+        const profilePic = contactInfo.profile_pic || '';
         
+        console.log(`📩 Received: "${text}" from ${waNumber} (${userName})`);
+        
+        // ===== AUTO-REGISTER USER WITH FULL INFO =====
         await registerUserOnServer(waNumber, userName, profilePic);
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
         const args = parts.slice(1);
         
-        // ===== VOTE COMMAND (Works in both group and private) =====
+        // ===== VOTE COMMAND =====
         if (command === '!vote') {
-            await handleVoteCommand(sock, from, sender, isGroup);
+            await handleVoteCommand(sock, from, sender, isGroup, contactInfo);
             return;
         }
         
@@ -284,8 +372,9 @@ async function handleCommands(sock, msg) {
 }
 
 // ===== INDIVIDUAL COMMAND HANDLERS =====
-async function handleVoteCommand(sock, from, sender, isGroup) {
-    const waNumber = cleanWaNumber(sender);
+async function handleVoteCommand(sock, from, sender, isGroup, contactInfo) {
+    const waNumber = contactInfo.wa_number;
+    const userName = contactInfo.name || contactInfo.notify || '';
     const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
     
     try {
@@ -297,15 +386,19 @@ async function handleVoteCommand(sock, from, sender, isGroup) {
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${fullLink}\n\n` +
+                         `👤 *Name:* ${userName || 'Not set'}\n` +
+                         `📱 *Number:* ${waNumber}\n` +
                          `⚽ *Match:* ${match.name}\n` +
                          `⏰ *Kickoff:* ${new Date(match.kickoff).toLocaleString()}\n\n` +
-                         `🔒 This link is personal to you (${waNumber})`;
+                         `🔒 This link is personal to you.`;
         } else {
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${votingLink}\n\n` +
+                         `👤 *Name:* ${userName || 'Not set'}\n` +
+                         `📱 *Number:* ${waNumber}\n` +
                          `No active match found. Check back later!\n\n` +
-                         `🔒 This link is personal to you (${waNumber})`;
+                         `🔒 This link is personal to you.`;
         }
         
         // Send as PRIVATE message
