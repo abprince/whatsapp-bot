@@ -21,53 +21,26 @@ function getUserId(jid) {
 }
 
 // ==================== PROFILE PICTURE FETCHING ====================
-// ==================== PROFILE PICTURE FETCHING (FIXED) ====================
 async function fetchProfilePicture(sock, jid) {
     // Extract the pure number from the JID
     const pureNumber = jid.replace(/@[a-z.]+/g, '');
     
-    // Create the correct JID format for profile picture
-    // WhatsApp expects: number@s.whatsapp.net for profile pictures
+    // The CORRECT format for profile pictures
     const correctJid = `${pureNumber}@s.whatsapp.net`;
     
-    console.log(`📸 Fetching profile picture for: ${correctJid} (original: ${jid})`);
+    console.log(`📸 Fetching profile picture for: ${correctJid}`);
     
     try {
-        // Try preview first
-        const previewUrl = await sock.profilePictureUrl(correctJid, 'preview');
-        if (previewUrl) {
-            console.log(`✅ Profile picture found (preview) for: ${correctJid}`);
-            return previewUrl;
-        }
-    } catch (error) {
-        console.log(`📸 No preview for ${correctJid}:`, error.message);
-    }
-    
-    try {
-        // Try high-res image
-        const highResUrl = await sock.profilePictureUrl(correctJid, 'image');
-        if (highResUrl) {
-            console.log(`✅ Profile picture found (high-res) for: ${correctJid}`);
-            return highResUrl;
-        }
-    } catch (error) {
-        console.log(`📸 No high-res for ${correctJid}:`, error.message);
-    }
-    
-    // If @s.whatsapp.net fails, try @c.us as fallback
-    try {
-        const fallbackJid = `${pureNumber}@c.us`;
-        console.log(`📸 Trying fallback format: ${fallbackJid}`);
-        const ppUrl = await sock.profilePictureUrl(fallbackJid, 'preview');
+        const ppUrl = await sock.profilePictureUrl(correctJid, 'preview');
         if (ppUrl) {
-            console.log(`✅ Profile picture found with fallback format`);
+            console.log(`✅ Profile picture found`);
             return ppUrl;
         }
     } catch (error) {
-        // Ignore
+        console.log(`📸 No profile picture: ${error.message}`);
+        // This will be "item-not-found" if the user has no public picture
     }
     
-    console.log(`❌ No profile picture available for: ${jid}`);
     return '';
 }
 
