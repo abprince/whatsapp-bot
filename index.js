@@ -13,26 +13,11 @@ const API_URL = 'https://aramedia.me/worldcup/api.php';
 const WEB_URL = 'https://aramedia.me/worldcup';
 const BOT_NUMBER = '919108949369';
 
-// ==================== CONTACT CACHE ====================
-const contactCache = new Map();
-
 // ==================== HELPER FUNCTIONS ====================
-function extractPhoneNumber(jid) {
-    // Try to extract phone number from various JID formats
-    if (/^[0-9]+$/.test(jid)) {
-        return jid;
-    }
-    
-    // Remove any suffix
-    let number = jid.replace(/@[a-z.]+/g, '');
-    number = number.replace(/\D/g, '');
-    
-    // If number is 10 digits, assume India (+91)
-    if (number.length === 10) {
-        number = '91' + number;
-    }
-    
-    return number;
+function getUserId(jid) {
+    // Remove @suffix, keep the ID
+    let id = jid.replace(/@[a-z.]+/g, '');
+    return id;
 }
 
 // ==================== API FUNCTIONS ====================
@@ -195,6 +180,42 @@ function scheduleDailyReminder() {
     }, msUntilTarget);
 }
 
+// ==================== GET PROFILE PICTURE ====================
+async function getUserProfilePicture(sock, jid) {
+    try {
+        // Try with the full JID
+        const ppUrl = await sock.profilePictureUrl(jid, 'preview');
+        if (ppUrl) {
+            console.log(`📸 Profile picture found for ${jid}`);
+            return ppUrl;
+        }
+    } catch (error) {
+        // Check if error is because user has no profile picture
+        if (error.message && error.message.includes('profile picture')) {
+            console.log(`📸 No profile picture for ${jid}`);
+        } else {
+            console.log(`📸 Could not fetch profile picture for ${jid}:`, error.message);
+        }
+    }
+    
+    // If we have a phone number format, try that too
+    try {
+        // Try with @c.us format
+        const phoneJid = jid.replace(/@[a-z.]+/g, '') + '@c.us';
+        if (phoneJid !== jid) {
+            const ppUrl = await sock.profilePictureUrl(phoneJid, 'preview');
+            if (ppUrl) {
+                console.log(`📸 Profile picture found for ${phoneJid}`);
+                return ppUrl;
+            }
+        }
+    } catch (error) {
+        // Ignore
+    }
+    
+    return ''; // No profile picture found
+}
+
 // ==================== COMMAND HANDLERS ====================
 async function handleCommands(sock, msg) {
     const msgData = msg.messages[0];
@@ -205,75 +226,35 @@ async function handleCommands(sock, msg) {
         const sender = msgData.key.participant || msgData.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         
+        // Get user info from the message
+        const pushName = msgData.pushName || '';
+        const waNumber = getUserId(sender); // Use LID as unique ID
+        const displayName = pushName || waNumber;
+        
+        // ===== GET PROFILE PICTURE =====
+        let profilePic = '';
+        try {
+            profilePic = await getUserProfilePicture(sock, sender);
+            // If we got a URL, log it
+            if (profilePic) {
+                console.log(`📸 Profile picture URL: ${profilePic.substring(0, 50)}...`);
+            }
+        } catch (error) {
+            console.log(`Could not get profile picture: ${error.message}`);
+        }
+        
+        console.log(`📩 Received: "${text}" from ${displayName} (ID: ${waNumber})`);
+        
         // Save group if it's a group message
         if (isGroup) {
             await saveGroup(from);
         }
         
-        // ===== GET USER INFO FROM THE MESSAGE =====
-        // IMPORTANT: pushName is directly available from the message
-        const pushName = msgData.pushName || ''; // This is the user's WhatsApp profile name!
-        const rawJid = sender;
-        
-        // Extract the phone number from the JID
-        let waNumber = extractPhoneNumber(sender);
-        
-        // Try to get contact details from Baileys
-        let contactName = pushName; // Start with pushName
-        let profilePic = '';
-        
-        try {
-            // Method 1: Try getContact (may work for some numbers)
-            const contact = await sock.getContact(sender);
-            if (contact) {
-                // If we have a phone number from contact, use it
-                if (contact.phoneNumber) {
-                    const cleanNum = extractPhoneNumber(contact.phoneNumber);
-                    if (cleanNum.length >= 10) {
-                        waNumber = cleanNum;
-                    }
-                }
-                // Use name from contact if available
-                if (contact.name || contact.notify) {
-                    contactName = contact.name || contact.notify || pushName;
-                }
-            }
-        } catch (e) {
-            // getContact failed, keep using pushName
-            console.log(`Could not get contact: ${e.message}`);
-        }
-        
-        // Method 2: Try to get profile picture
-        try {
-            // Try with the JID first
-            const ppUrl = await sock.profilePictureUrl(sender, 'preview');
-            if (ppUrl) {
-                profilePic = ppUrl;
-            }
-        } catch (e) {
-            // Try with extracted number if different
-            if (waNumber !== sender) {
-                try {
-                    const ppUrl = await sock.profilePictureUrl(`${waNumber}@c.us`, 'preview');
-                    if (ppUrl) {
-                        profilePic = ppUrl;
-                    }
-                } catch (e2) {
-                    // Profile picture not available
-                }
-            }
-        }
-        
-        // If we still don't have a good number, try to extract from message
-        if (waNumber.length < 10) {
-            waNumber = extractPhoneNumber(sender);
-        }
-        
-        // Log the extracted info
-        console.log(`📩 Received: "${text}" from ${waNumber} (${contactName})`);
-        
         // ===== REGISTER USER WITH FULL INFO =====
-        await registerUserOnServer(waNumber, contactName, profilePic);
+        const registerResult = await registerUserOnServer(waNumber, displayName, profilePic);
+        if (registerResult && registerResult.success) {
+            console.log(`✅ User registered: ${displayName} (${waNumber})`);
+        }
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
@@ -281,7 +262,7 @@ async function handleCommands(sock, msg) {
         
         // ===== VOTE COMMAND =====
         if (command === '!vote') {
-            await handleVoteCommand(sock, from, sender, isGroup, waNumber, contactName);
+            await handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName);
             return;
         }
         
@@ -336,7 +317,7 @@ async function handleCommands(sock, msg) {
 }
 
 // ===== INDIVIDUAL COMMAND HANDLERS =====
-async function handleVoteCommand(sock, from, sender, isGroup, waNumber, contactName) {
+async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName) {
     const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
     
     try {
@@ -348,8 +329,8 @@ async function handleVoteCommand(sock, from, sender, isGroup, waNumber, contactN
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${fullLink}\n\n` +
-                         `👤 *Name:* ${contactName || 'Not set'}\n` +
-                         `📱 *Number:* ${waNumber}\n` +
+                         `👤 *Name:* ${displayName}\n` +
+                         `🆔 *Your ID:* ${waNumber}\n` +
                          `⚽ *Match:* ${match.name}\n` +
                          `⏰ *Kickoff:* ${new Date(match.kickoff).toLocaleString()}\n\n` +
                          `🔒 This link is personal to you.`;
@@ -357,8 +338,8 @@ async function handleVoteCommand(sock, from, sender, isGroup, waNumber, contactN
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${votingLink}\n\n` +
-                         `👤 *Name:* ${contactName || 'Not set'}\n` +
-                         `📱 *Number:* ${waNumber}\n` +
+                         `👤 *Name:* ${displayName}\n` +
+                         `🆔 *Your ID:* ${waNumber}\n` +
                          `No active match found. Check back later!\n\n` +
                          `🔒 This link is personal to you.`;
         }
