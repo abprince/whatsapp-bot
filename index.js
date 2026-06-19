@@ -13,7 +13,23 @@ const API_URL = 'https://aramedia.me/worldcup/api.php';
 const WEB_URL = 'https://aramedia.me/worldcup';
 const BOT_NUMBER = '919108949369'; // YOUR REAL BOT NUMBER
 
-// ==================== UPDATED API FUNCTIONS ====================
+// ==================== HELPER FUNCTIONS ====================
+function cleanWaNumber(sender) {
+    // Remove any suffix like @c.us, @g.us, @lid, @s.whatsapp.net
+    let number = sender.replace(/@[a-z.]+/g, '');
+    
+    // Remove any non-digit characters
+    number = number.replace(/\D/g, '');
+    
+    // If we got a 10-digit number, assume India (+91) as default
+    if (number.length === 10) {
+        number = '91' + number;
+    }
+    
+    return number;
+}
+
+// ==================== API FUNCTIONS ====================
 async function apiRequest(endpoint, method = 'GET', data = null) {
     try {
         const config = {
@@ -183,14 +199,17 @@ async function handleCommands(sock, msg) {
         const sender = msgData.key.participant || msgData.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         
+        // Clean the number
+        const waNumber = cleanWaNumber(sender);
+        
+        console.log(`📩 Received: "${text}" from ${waNumber} (raw: ${sender})`);
+        
         // Save group if it's a group message
         if (isGroup) {
             await saveGroup(from);
         }
         
-        const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
-        
-        // ===== AUTO-REGISTER USER ON ANY MESSAGE =====
+        // ===== AUTO-REGISTER USER WITH CLEAN NUMBER =====
         let userName = '';
         let profilePic = '';
         try {
@@ -201,23 +220,23 @@ async function handleCommands(sock, msg) {
         } catch (e) {
             // Ignore
         }
-        await registerUserOnServer(waNumber, userName, profilePic);
         
-        console.log(`📩 Received: "${text}" from ${waNumber}`);
+        await registerUserOnServer(waNumber, userName, profilePic);
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
         const args = parts.slice(1);
         
         // ===== VOTE COMMAND (Works in both group and private) =====
-        if (text === '!vote' || text === '!vote') {
+        if (command === '!vote') {
             await handleVoteCommand(sock, from, sender, isGroup);
             return;
         }
         
         // ===== GROUP ADMIN COMMANDS =====
         if (isGroup && command === '!creatematch') {
-            // ... existing code
+            await handleCreateMatchCommand(sock, from, text);
+            return;
         }
         
         // ===== VIEW LEADERBOARD =====
@@ -266,7 +285,7 @@ async function handleCommands(sock, msg) {
 
 // ===== INDIVIDUAL COMMAND HANDLERS =====
 async function handleVoteCommand(sock, from, sender, isGroup) {
-    const waNumber = sender.replace('@c.us', '').replace('@g.us', '');
+    const waNumber = cleanWaNumber(sender);
     const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
     
     try {
@@ -308,6 +327,58 @@ async function handleVoteCommand(sock, from, sender, isGroup) {
                 text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` 
             });
         }
+    }
+}
+
+async function handleCreateMatchCommand(sock, from, text) {
+    try {
+        let matchName = '';
+        let kickoffTime = '';
+        let team1 = '';
+        let team2 = '';
+        
+        const matchNameMatch = text.match(/"([^"]+)"/);
+        if (matchNameMatch) {
+            matchName = matchNameMatch[1];
+            const teams = matchName.split(' vs ').map(t => t.trim());
+            team1 = teams[0] || '';
+            team2 = teams[1] || '';
+        }
+        
+        const timeMatch = text.match(/"([^"]+)"$/);
+        if (timeMatch) {
+            kickoffTime = timeMatch[1];
+        }
+        
+        if (!matchName || !kickoffTime || !team1 || !team2) {
+            await sock.sendMessage(from, { 
+                text: '❌ Usage: !creatematch "Team A vs Team B" "2026-06-20 15:00"' 
+            });
+            return;
+        }
+        
+        const matchData = {
+            id: Date.now().toString(),
+            name: matchName,
+            team1: team1,
+            team2: team2,
+            kickoff: new Date(kickoffTime).toISOString(),
+            created_by: from
+        };
+        
+        const result = await createMatchOnServer(matchData);
+        
+        if (result && result.success) {
+            const votingLink = `${WEB_URL}/index.php?match=${matchData.id}`;
+            await sock.sendMessage(from, {
+                text: `✅ Match Created Successfully!\n\n📋 *${matchName}*\n⏰ Kickoff: ${new Date(kickoffTime).toLocaleString()}\n\n📱 Get your personal voting link by typing: !vote\n\n📱 Or vote here:\n${votingLink}`
+            });
+        } else {
+            await sock.sendMessage(from, { text: '❌ Failed to create match. Please try again.' });
+        }
+    } catch (error) {
+        console.error('Error in !creatematch:', error);
+        await sock.sendMessage(from, { text: '❌ Error creating match. Check format!' });
     }
 }
 
