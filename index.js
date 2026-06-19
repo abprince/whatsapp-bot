@@ -15,45 +15,53 @@ const BOT_NUMBER = '919108949369';
 
 // ==================== HELPER FUNCTIONS ====================
 function getUserId(jid) {
+    // Extract the ID from JID (remove @suffix)
     let id = jid.replace(/@[a-z.]+/g, '');
     return id;
 }
 
 // ==================== PROFILE PICTURE FETCHING ====================
 async function fetchProfilePicture(sock, jid) {
-    // Try multiple JID formats
-    const formats = [
-        jid, // Original: 80754444869651@lid
-        jid.replace(/@lid/, '@s.whatsapp.net'), // 80754444869651@s.whatsapp.net
-        jid.replace(/@[a-z.]+/g, '') + '@c.us', // 80754444869651@c.us
-    ];
-    
-    // Remove duplicates
-    const uniqueFormats = [...new Set(formats)];
-    
-    for (const format of uniqueFormats) {
-        try {
-            console.log(`📸 Trying to fetch profile picture with: ${format}`);
-            const ppUrl = await sock.profilePictureUrl(format, 'preview');
-            if (ppUrl) {
-                console.log(`✅ Profile picture found for: ${format}`);
-                return ppUrl;
-            }
-        } catch (error) {
-            // Check if error is because user has no profile picture
-            if (error.message && (
-                error.message.includes('profile picture') || 
-                error.message.includes('404') ||
-                error.message.includes('not found')
-            )) {
-                console.log(`📸 No profile picture for: ${format}`);
-            } else {
-                console.log(`📸 Error fetching for ${format}:`, error.message);
-            }
+    try {
+        console.log(`📸 Fetching profile picture for: ${jid}`);
+        
+        // Try preview first (faster, lower quality)
+        const previewUrl = await sock.profilePictureUrl(jid, 'preview');
+        if (previewUrl) {
+            console.log(`✅ Profile picture found (preview) for: ${jid}`);
+            return previewUrl;
         }
+    } catch (error) {
+        console.log(`📸 No preview for ${jid}:`, error.message);
     }
     
-    console.log(`❌ No profile picture found for any format of: ${jid}`);
+    try {
+        // Try high-res image (slower, better quality)
+        const highResUrl = await sock.profilePictureUrl(jid, 'image');
+        if (highResUrl) {
+            console.log(`✅ Profile picture found (high-res) for: ${jid}`);
+            return highResUrl;
+        }
+    } catch (error) {
+        console.log(`📸 No high-res for ${jid}:`, error.message);
+    }
+    
+    // If @lid format fails, try @s.whatsapp.net as fallback
+    try {
+        const altJid = jid.replace(/@lid/, '@s.whatsapp.net');
+        if (altJid !== jid) {
+            console.log(`📸 Trying alt format: ${altJid}`);
+            const ppUrl = await sock.profilePictureUrl(altJid, 'preview');
+            if (ppUrl) {
+                console.log(`✅ Profile picture found with alt format`);
+                return ppUrl;
+            }
+        }
+    } catch (error) {
+        // Ignore
+    }
+    
+    console.log(`❌ No profile picture available for: ${jid}`);
     return '';
 }
 
@@ -120,7 +128,7 @@ async function getMatchesFromServer() {
 }
 
 async function registerUserOnServer(waNumber, name = '', profilePic = '') {
-    console.log(`📝 Registering user: ${waNumber}, Name: ${name}, Has Pic: ${profilePic ? '✅' : '❌'}`);
+    console.log(`📝 Registering: ${waNumber}, Name: ${name}, Has Pic: ${profilePic ? '✅' : '❌'}`);
     return await apiRequest('register_user', 'POST', {
         wa_number: waNumber,
         name: name,
@@ -238,31 +246,21 @@ async function handleCommands(sock, msg) {
         const waNumber = getUserId(sender);
         const displayName = pushName || waNumber;
         
-        console.log(`📩 Received: "${text}" from ${displayName} (ID: ${waNumber})`);
+        console.log(`📩 Received: "${text}" from ${displayName} (JID: ${sender})`);
         
         // ===== FETCH PROFILE PICTURE =====
         let profilePic = '';
         try {
-            console.log(`📸 Attempting to fetch profile picture for: ${sender}`);
             profilePic = await fetchProfilePicture(sock, sender);
-            
             if (profilePic) {
                 console.log(`✅ Profile picture URL: ${profilePic.substring(0, 60)}...`);
-            } else {
-                console.log(`❌ No profile picture available for ${sender}`);
             }
         } catch (error) {
             console.error(`❌ Error fetching profile picture:`, error.message);
         }
         
         // ===== REGISTER USER =====
-        const registerResult = await registerUserOnServer(waNumber, displayName, profilePic);
-        if (registerResult && registerResult.success) {
-            console.log(`✅ User registered: ${displayName} (${waNumber})`);
-            if (registerResult.profile_pic) {
-                console.log(`✅ Profile picture saved: ${registerResult.profile_pic.substring(0, 60)}...`);
-            }
-        }
+        await registerUserOnServer(waNumber, displayName, profilePic);
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
@@ -352,6 +350,7 @@ async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayN
                          `🔒 This link is personal to you.`;
         }
         
+        // Send as PRIVATE message
         await sock.sendMessage(sender, { text: messageText });
         
         if (isGroup) {
@@ -748,6 +747,55 @@ async function connectToWhatsApp() {
     return sock;
 }
 
+// ==================== KEEP ALIVE ENDPOINT ====================
+// Add this BEFORE app.listen
+app.get('/ping', (req, res) => {
+    res.status(200).json({
+        status: 'alive',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        bot: sock ? 'connected' : 'disconnected'
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
+// ==================== KEEP ALIVE FUNCTION ====================
+// Replace the old setInterval with this
+async function keepAlive() {
+    try {
+        // Ping the local server
+        const response = await axios.get(`http://localhost:${PORT}/ping`, {
+            timeout: 5000
+        });
+        console.log(`🔄 Keep-alive ping successful (${response.data.timestamp})`);
+    } catch (error) {
+        console.log(`🔄 Local keep-alive failed: ${error.message}`);
+        
+        // Try external URL if available
+        try {
+            const externalUrl = process.env.RENDER_EXTERNAL_HOSTNAME 
+                ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping` 
+                : null;
+            if (externalUrl) {
+                const extResponse = await axios.get(externalUrl, { timeout: 5000 });
+                console.log(`🔄 External keep-alive successful (${extResponse.status})`);
+            }
+        } catch (extError) {
+            console.log(`🔄 External keep-alive failed: ${extError.message}`);
+        }
+    }
+}
+
+// Start improved keep-alive (every 4 minutes)
+setInterval(keepAlive, 240000);
+
+// Initial ping after 10 seconds
+setTimeout(keepAlive, 10000);
+
+// ==================== ORIGINAL CODE BELOW (KEEP THESE) ====================
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌐 Web dashboard: ${WEB_URL}`);
@@ -757,7 +805,5 @@ app.listen(PORT, () => {
 // ==================== START BOT ====================
 connectToWhatsApp();
 
-// Keep alive
-setInterval(() => {
-    console.log('🔄 Keep-alive ping');
-}, 300000);
+// The old keep-alive is REPLACED by the new one above
+// Remove or comment out the old setInterval
