@@ -14,23 +14,17 @@ const WEB_URL = 'https://aramedia.me/worldcup';
 const BOT_NUMBER = '919108949369';
 
 // ==================== CONTACT CACHE ====================
-// Store contact info to avoid repeated API calls
 const contactCache = new Map();
 
 // ==================== HELPER FUNCTIONS ====================
 function extractPhoneNumber(jid) {
     // Try to extract phone number from various JID formats
-    // @c.us, @s.whatsapp.net, @lid, @g.us, etc.
-    
-    // If it's already a clean number, return it
     if (/^[0-9]+$/.test(jid)) {
         return jid;
     }
     
     // Remove any suffix
     let number = jid.replace(/@[a-z.]+/g, '');
-    
-    // Remove any non-digit characters
     number = number.replace(/\D/g, '');
     
     // If number is 10 digits, assume India (+91)
@@ -39,90 +33,6 @@ function extractPhoneNumber(jid) {
     }
     
     return number;
-}
-
-async function getUserContactInfo(sock, jid) {
-    try {
-        // Check cache first
-        if (contactCache.has(jid)) {
-            return contactCache.get(jid);
-        }
-        
-        // Initialize contact info
-        let contactInfo = {
-            wa_number: extractPhoneNumber(jid),
-            name: '',
-            profile_pic: '',
-            raw_jid: jid,
-            phoneNumber: '',
-            notify: '',
-            pushName: ''
-        };
-        
-        // Method 1: Try to get contact from socket
-        try {
-            const contact = await sock.getContact(jid);
-            if (contact) {
-                contactInfo.name = contact.name || contact.notify || '';
-                contactInfo.notify = contact.notify || '';
-                contactInfo.phoneNumber = contact.phoneNumber || '';
-                
-                // If we got a phoneNumber, use it
-                if (contact.phoneNumber) {
-                    const cleanNum = extractPhoneNumber(contact.phoneNumber);
-                    if (cleanNum.length >= 10) {
-                        contactInfo.wa_number = cleanNum;
-                    }
-                }
-            }
-        } catch (e) {
-            console.log(`Could not get contact via getContact: ${e.message}`);
-        }
-        
-        // Method 2: Try to get profile picture
-        try {
-            const ppUrl = await sock.profilePictureUrl(jid, 'preview');
-            if (ppUrl) {
-                contactInfo.profile_pic = ppUrl;
-            }
-        } catch (e) {
-            // Profile picture not available (private or not set)
-            console.log(`No profile picture for ${jid}: ${e.message}`);
-        }
-        
-        // Method 3: Try to get presence info (might give us more details)
-        try {
-            const presence = await sock.presenceSubscribe(jid);
-            // Presence might give us additional info
-        } catch (e) {
-            // Ignore
-        }
-        
-        // Method 4: If we still don't have a name, try to extract from the JID
-        if (!contactInfo.name) {
-            // Try to get the user's display name from the phone number
-            const phoneNumber = extractPhoneNumber(jid);
-            // Sometimes the number itself is the best we can do
-            contactInfo.name = phoneNumber;
-        }
-        
-        // Cache the result
-        contactCache.set(jid, contactInfo);
-        
-        return contactInfo;
-    } catch (error) {
-        console.error(`Error getting contact info for ${jid}:`, error);
-        // Return basic info with extracted number
-        return {
-            wa_number: extractPhoneNumber(jid),
-            name: extractPhoneNumber(jid),
-            profile_pic: '',
-            raw_jid: jid,
-            phoneNumber: '',
-            notify: '',
-            pushName: ''
-        };
-    }
 }
 
 // ==================== API FUNCTIONS ====================
@@ -300,16 +210,70 @@ async function handleCommands(sock, msg) {
             await saveGroup(from);
         }
         
-        // ===== GET USER CONTACT INFO =====
-        const contactInfo = await getUserContactInfo(sock, sender);
-        const waNumber = contactInfo.wa_number;
-        const userName = contactInfo.name || contactInfo.notify || '';
-        const profilePic = contactInfo.profile_pic || '';
+        // ===== GET USER INFO FROM THE MESSAGE =====
+        // IMPORTANT: pushName is directly available from the message
+        const pushName = msgData.pushName || ''; // This is the user's WhatsApp profile name!
+        const rawJid = sender;
         
-        console.log(`📩 Received: "${text}" from ${waNumber} (${userName})`);
+        // Extract the phone number from the JID
+        let waNumber = extractPhoneNumber(sender);
         
-        // ===== AUTO-REGISTER USER WITH FULL INFO =====
-        await registerUserOnServer(waNumber, userName, profilePic);
+        // Try to get contact details from Baileys
+        let contactName = pushName; // Start with pushName
+        let profilePic = '';
+        
+        try {
+            // Method 1: Try getContact (may work for some numbers)
+            const contact = await sock.getContact(sender);
+            if (contact) {
+                // If we have a phone number from contact, use it
+                if (contact.phoneNumber) {
+                    const cleanNum = extractPhoneNumber(contact.phoneNumber);
+                    if (cleanNum.length >= 10) {
+                        waNumber = cleanNum;
+                    }
+                }
+                // Use name from contact if available
+                if (contact.name || contact.notify) {
+                    contactName = contact.name || contact.notify || pushName;
+                }
+            }
+        } catch (e) {
+            // getContact failed, keep using pushName
+            console.log(`Could not get contact: ${e.message}`);
+        }
+        
+        // Method 2: Try to get profile picture
+        try {
+            // Try with the JID first
+            const ppUrl = await sock.profilePictureUrl(sender, 'preview');
+            if (ppUrl) {
+                profilePic = ppUrl;
+            }
+        } catch (e) {
+            // Try with extracted number if different
+            if (waNumber !== sender) {
+                try {
+                    const ppUrl = await sock.profilePictureUrl(`${waNumber}@c.us`, 'preview');
+                    if (ppUrl) {
+                        profilePic = ppUrl;
+                    }
+                } catch (e2) {
+                    // Profile picture not available
+                }
+            }
+        }
+        
+        // If we still don't have a good number, try to extract from message
+        if (waNumber.length < 10) {
+            waNumber = extractPhoneNumber(sender);
+        }
+        
+        // Log the extracted info
+        console.log(`📩 Received: "${text}" from ${waNumber} (${contactName})`);
+        
+        // ===== REGISTER USER WITH FULL INFO =====
+        await registerUserOnServer(waNumber, contactName, profilePic);
         
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
@@ -317,7 +281,7 @@ async function handleCommands(sock, msg) {
         
         // ===== VOTE COMMAND =====
         if (command === '!vote') {
-            await handleVoteCommand(sock, from, sender, isGroup, contactInfo);
+            await handleVoteCommand(sock, from, sender, isGroup, waNumber, contactName);
             return;
         }
         
@@ -372,9 +336,7 @@ async function handleCommands(sock, msg) {
 }
 
 // ===== INDIVIDUAL COMMAND HANDLERS =====
-async function handleVoteCommand(sock, from, sender, isGroup, contactInfo) {
-    const waNumber = contactInfo.wa_number;
-    const userName = contactInfo.name || contactInfo.notify || '';
+async function handleVoteCommand(sock, from, sender, isGroup, waNumber, contactName) {
     const votingLink = `${WEB_URL}/index.php?wa=${waNumber}`;
     
     try {
@@ -386,7 +348,7 @@ async function handleVoteCommand(sock, from, sender, isGroup, contactInfo) {
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${fullLink}\n\n` +
-                         `👤 *Name:* ${userName || 'Not set'}\n` +
+                         `👤 *Name:* ${contactName || 'Not set'}\n` +
                          `📱 *Number:* ${waNumber}\n` +
                          `⚽ *Match:* ${match.name}\n` +
                          `⏰ *Kickoff:* ${new Date(match.kickoff).toLocaleString()}\n\n` +
@@ -395,7 +357,7 @@ async function handleVoteCommand(sock, from, sender, isGroup, contactInfo) {
             messageText = `📱 *Your Personal Voting Link*\n\n` +
                          `Click the link below to vote:\n` +
                          `${votingLink}\n\n` +
-                         `👤 *Name:* ${userName || 'Not set'}\n` +
+                         `👤 *Name:* ${contactName || 'Not set'}\n` +
                          `📱 *Number:* ${waNumber}\n` +
                          `No active match found. Check back later!\n\n` +
                          `🔒 This link is personal to you.`;
