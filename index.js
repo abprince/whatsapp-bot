@@ -337,7 +337,6 @@ async function handlePollCommand(sock, from) {
         let totalMentions = [];
 
         // 5. Loop through each match in the active poll
-        // 5. Loop through each match in the active poll
         for (const match of activePoll.matches) {
             if (!match) continue;
             
@@ -348,16 +347,14 @@ async function handlePollCommand(sock, from) {
             const votedUserIds = votes.map(v => String(v.wa_number));
 
             // Find missing voters
-            let missingVotersText = [];
+            let missingVotersNames = [];
             leaderboardUsers.forEach(user => {
                 const userIdStr = String(user.wa_number);
                 if (!votedUserIds.includes(userIdStr)) {
                     
-                    // ==========================================
-                    // Custom display: Checks for a name, otherwise falls back to the number
+                    // Display only the name. If no name exists, fall back to a clean +phone format
                     const userDisplayName = user.name ? user.name : `+${userIdStr}`;
-                    missingVotersText.push(`${userDisplayName} (@${userIdStr})`);
-                    // ==========================================
+                    missingVotersNames.push(userDisplayName);
 
                     if (!totalMentions.includes(`${userIdStr}@s.whatsapp.net`)) {
                         totalMentions.push(`${userIdStr}@s.whatsapp.net`);
@@ -365,14 +362,20 @@ async function handlePollCommand(sock, from) {
                 }
             });
 
-            if (missingVotersText.length > 0) {
-                responseText += `⏳ *Pending Votes:* ${missingVotersText.join(', ')}\n\n`;
+            if (missingVotersNames.length > 0) {
+                responseText += `⏳ *Pending Votes:* ${missingVotersNames.join(', ')}\n\n`;
             } else {
                 responseText += `✅ *All users have voted!*\n\n`;
             }
             index++;
         }
-        responseText += `🔥 *Vote now! Do not miss out:*\n🔗 ${WEB_URL}/vote.php`;
+
+        responseText += `🔥 *Vote now! Do not miss out:*\n🔗 ${WEB_URL}/vote.php\n`;
+
+        // 5b. Hidden structural attachment so WhatsApp processes notifications/mentions silently
+        if (totalMentions.length > 0) {
+            responseText += `\n` + totalMentions.map(id => `@${id.split('@')[0]}`).join(' ');
+        }
 
         // 6. Dispatch response with explicit native mentions array context
         await sock.sendMessage(from, { 
