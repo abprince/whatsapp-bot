@@ -20,7 +20,7 @@ function getUserId(jid) {
     return id;
 }
 
-// ==================== PROFILE PICTURE FETCHING ====================
+// Your code is already doing exactly what it should
 async function fetchProfilePicture(sock, jid) {
     const pureNumber = jid.replace(/@[a-z.]+/g, '');
     const correctJid = `${pureNumber}@s.whatsapp.net`;
@@ -676,50 +676,77 @@ app.get('/qr', async (req, res) => {
 // ==================== BOT CONNECTION ====================
 let sock;
 
+// ==================== AUTO RESTART LOGIC ====================
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    const { version } = await fetchLatestBaileysVersion();
+    console.log('🔄 Connecting to WhatsApp...');
+    
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+        const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
-    });
+        sock = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: true,
+            logger: pino({ level: 'silent' }),
+            // Better settings for stability
+            markOnlineOnConnect: true,
+            syncFullHistory: false,
+        });
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            currentQR = qr;
-            console.log('📱 New QR Code Generated');
-        }
-
-        if (connection === 'open') {
-            console.log('✅ Bot is Online!');
-            currentQR = null;
-            console.log('🤖 Connected to PHP server at:', API_URL);
-            console.log(`📱 Bot Number: ${BOT_NUMBER}`);
-            console.log(`🔗 Click-to-chat: https://wa.me/${BOT_NUMBER}?text=!vote`);
-            
-            scheduleDailyReminder();
-        }
-
-        if (connection === 'close') {
-            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 Reconnecting in 10 seconds...');
-                setTimeout(connectToWhatsApp, 10000);
+            if (qr) {
+                currentQR = qr;
+                console.log('📱 New QR Code Generated');
             }
+
+            if (connection === 'open') {
+                console.log('✅ Bot is Online!');
+                currentQR = null;
+                reconnectAttempts = 0;   // Reset counter on successful connection
+                console.log('🤖 Connected to PHP server at:', API_URL);
+                
+                scheduleDailyReminder();
+            }
+
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                
+                console.log(`❌ Connection closed. Status: ${statusCode}`);
+
+                if (statusCode !== DisconnectReason.loggedOut) {
+                    reconnectAttempts++;
+                    
+                    if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+                        const delay = Math.min(5000 * reconnectAttempts, 30000); // max 30 seconds
+                        console.log(`🔄 Reconnecting in ${delay/1000} seconds... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                        
+                        setTimeout(connectToWhatsApp, delay);
+                    } else {
+                        console.log('🚨 Too many reconnection attempts. Restarting full process...');
+                        reconnectAttempts = 0;
+                        setTimeout(() => process.exit(1), 5000); // Force Render to restart the service
+                    }
+                } else {
+                    console.log('❌ Logged out. Need to scan QR again.');
+                }
+            }
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+    } catch (error) {
+        console.error('❌ Error in connectToWhatsApp:', error);
+        reconnectAttempts++;
+        if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+            setTimeout(connectToWhatsApp, 10000);
         }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('messages.upsert', async (m) => {
-        await handleCommands(sock, m);
-    });
-
-    return sock;
+    }
 }
 
 // ==================== KEEP ALIVE ENDPOINT ====================
@@ -729,46 +756,32 @@ app.get('/ping', (req, res) => {
         status: 'alive',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
+        memory: process.memoryUsage().heapUsed / 1024 / 1024 + ' MB',
         bot: sock ? 'connected' : 'disconnected'
     });
 });
 
-app.get('/health', (req, res) => {
-    res.status(200).send('OK');
-});
-
-// ==================== KEEP ALIVE FUNCTION ====================
-// Replace the old setInterval with this
+// ==================== BETTER KEEP ALIVE ====================
 async function keepAlive() {
-    try {
-        // Ping the local server
-        const response = await axios.get(`http://localhost:${PORT}/ping`, {
-            timeout: 5000
-        });
-        console.log(`🔄 Keep-alive ping successful (${response.data.timestamp})`);
-    } catch (error) {
-        console.log(`🔄 Local keep-alive failed: ${error.message}`);
-        
-        // Try external URL if available
+    const urls = [
+        `http://localhost:${PORT}/ping`,
+        `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'whatsapp-bot-v0ts.onrender.com'}/ping`
+    ];
+
+    for (const url of urls) {
         try {
-            const externalUrl = process.env.RENDER_EXTERNAL_HOSTNAME 
-                ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping` 
-                : null;
-            if (externalUrl) {
-                const extResponse = await axios.get(externalUrl, { timeout: 5000 });
-                console.log(`🔄 External keep-alive successful (${extResponse.status})`);
-            }
-        } catch (extError) {
-            console.log(`🔄 External keep-alive failed: ${extError.message}`);
+            const res = await axios.get(url, { timeout: 10000 });
+            console.log(`✅ Keep-alive OK → ${url}`);
+            return;
+        } catch (err) {
+            console.log(`⚠️ Keep-alive failed: ${url}`);
         }
     }
 }
 
-// Start improved keep-alive (every 4 minutes)
-setInterval(keepAlive, 240000);
-
-// Initial ping after 10 seconds
-setTimeout(keepAlive, 10000);
+// Run every 4 minutes
+setInterval(keepAlive, 4 * 60 * 1000);
+setTimeout(keepAlive, 15000); // Initial ping
 
 // ==================== ORIGINAL CODE BELOW (KEEP THESE) ====================
 app.listen(PORT, () => {
