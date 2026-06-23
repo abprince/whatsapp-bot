@@ -342,22 +342,28 @@ async function handlePollCommand(sock, from) {
             
             responseText += `*Match ${index}:*\n⚽ ${match.team1} vs ${match.team2}\n`;
 
-            // Fetch live submissions for this match item
+            // Fetch live submissions for this match item (contains raw wa_number system IDs)
             const votes = await getMatchVotesFromServer(match.id) || [];
             const votedUserIds = votes.map(v => String(v.wa_number));
 
             // Find missing voters
             let missingVotersNames = [];
             leaderboardUsers.forEach(user => {
-                const userIdStr = String(user.wa_number);
+                const userIdStr = String(user.wa_number); // System ID (e.g., "80754444869651")
+                
                 if (!votedUserIds.includes(userIdStr)) {
                     
-                    // Display only the name. If no name exists, fall back to a clean +phone format
-                    const userDisplayName = user.name ? user.name : `+${userIdStr}`;
-                    missingVotersNames.push(userDisplayName);
+                    // 1. Add their real Name to the text list
+                    missingVotersNames.push(user.name);
 
-                    if (!totalMentions.includes(`${userIdStr}@s.whatsapp.net`)) {
-                        totalMentions.push(`${userIdStr}@s.whatsapp.net`);
+                    // 2. Extract their stored physical mobile phone number for the blue notification tag
+                    if (user.mob_number) {
+                        const cleanMobile = String(user.mob_number).replace(/\D/g, '');
+                        const mentionJid = `${cleanMobile}@s.whatsapp.net`;
+
+                        if (!totalMentions.includes(mentionJid)) {
+                            totalMentions.push(mentionJid);
+                        }
                     }
                 }
             });
@@ -372,9 +378,14 @@ async function handlePollCommand(sock, from) {
 
         responseText += `🔥 *Vote now! Do not miss out:*\n🔗 ${WEB_URL}/vote.php\n`;
 
-        // 5b. Hidden structural attachment so WhatsApp processes notifications/mentions silently
+        // 5b. Appends structural tags using the matched mob_number values at the bottom
         if (totalMentions.length > 0) {
-            responseText += `\n` + totalMentions.map(id => `@${id.split('@')[0]}`).join(' ');
+            responseText += `\n🔔 *Reminders sent to:* `;
+            const tagStrings = totalMentions.map(jid => {
+                const pureMobile = jid.split('@')[0];
+                return `@${pureMobile}`;
+            });
+            responseText += tagStrings.join(' ');
         }
 
         // 6. Dispatch response with explicit native mentions array context
