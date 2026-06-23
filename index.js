@@ -337,6 +337,7 @@ async function handlePollCommand(sock, from) {
         let totalMentions = [];
 
         // 5. Loop through each match in the active poll
+        // 5. Loop through each match in the active poll
         for (const match of activePoll.matches) {
             if (!match) continue;
             
@@ -347,25 +348,30 @@ async function handlePollCommand(sock, from) {
             const votedUserIds = votes.map(v => String(v.wa_number));
 
             // Find missing voters
-            let missingVoters = [];
+            let missingVotersText = [];
             leaderboardUsers.forEach(user => {
                 const userIdStr = String(user.wa_number);
                 if (!votedUserIds.includes(userIdStr)) {
-                    missingVoters.push(`@${userIdStr}`);
+                    
+                    // ==========================================
+                    // Custom display: Checks for a name, otherwise falls back to the number
+                    const userDisplayName = user.name ? user.name : `+${userIdStr}`;
+                    missingVotersText.push(`${userDisplayName} (@${userIdStr})`);
+                    // ==========================================
+
                     if (!totalMentions.includes(`${userIdStr}@s.whatsapp.net`)) {
                         totalMentions.push(`${userIdStr}@s.whatsapp.net`);
                     }
                 }
             });
 
-            if (missingVoters.length > 0) {
-                responseText += `⏳ *Pending Votes:* ${missingVoters.join(', ')}\n\n`;
+            if (missingVotersText.length > 0) {
+                responseText += `⏳ *Pending Votes:* ${missingVotersText.join(', ')}\n\n`;
             } else {
                 responseText += `✅ *All users have voted!*\n\n`;
             }
             index++;
         }
-
         responseText += `🔥 *Vote now! Do not miss out:*\n🔗 ${WEB_URL}/vote.php`;
 
         // 6. Dispatch response with explicit native mentions array context
