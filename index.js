@@ -73,7 +73,10 @@ async function registerUserOnServer(waNumber, name = '', profilePic = '') {
 app.use(express.json());
 app.use(express.static('public'));
 
-
+// MINIMAL ENDPOINT FOR CRON JOB - RETURNS ONLY "OK"
+app.get('/keep-alive', (req, res) => {
+    res.status(200).send('OK');
+});
 
 app.get('/ping', (req, res) => res.status(200).json({}));
 app.get('/health', (req, res) => res.status(200).json({}));
@@ -117,29 +120,42 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// ==================== KEEP ALIVE ====================
+// ==================== KEEP ALIVE (FIXED FOR FREE TIER) ====================
 async function keepAlive() {
-    const urls = [
-        `http://localhost:${PORT}/ping`,
-        `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'whatsapp-bot-v0ts.onrender.com'}/ping`
-    ];
-    for (const url of urls) {
-        try {
-            await axios.get(url, { timeout: 8000 });
-            console.log(`✅ Keep-alive OK → ${url}`);
-            return;
-        } catch (err) {
-            console.log(`⚠️ Keep-alive failed: ${url}`);
-        }
+    try {
+        // Only ping localhost - this keeps the app awake
+        await axios.get(`http://localhost:${PORT}/keep-alive`, { timeout: 5000 });
+    } catch (err) {
+        // Silent fail - don't log errors to keep output small
+        // This prevents "output too large" error in cron jobs
     }
 }
-setInterval(keepAlive, 4 * 60 * 1000);
-setTimeout(keepAlive, 15000);
+
+// Run keepAlive every 5 minutes (prevents Render from sleeping)
+setInterval(keepAlive, 5 * 60 * 1000);
+// Run once after 10 seconds to start immediately
+setTimeout(keepAlive, 10000);
 
 // ==================== AUTO RESTART LOGIC / CONNECTION ====================
 async function connectToWhatsApp() {
-    console.log('🔄 Connecting to WhatsApp...');
+    console.log('🔄 Connecting to WhatsApp via DB Session Management...');
     try {
+        // 1. Ensure the directory structures exist safely
+        if (!fs.existsSync('auth_info')) {
+            fs.mkdirSync('auth_info');
+        }
+
+        // 2. Fetch credentials from your PHP backend database
+        console.log('📡 Syncing session state from PHP API...');
+        const dbSessionData = await apiRequest('get_session');
+        
+        if (dbSessionData && dbSessionData.session) {
+            console.log('🔑 Active session found in Database. Syncing locally...');
+            fs.writeFileSync('auth_info/creds.json', dbSessionData.session, 'utf8');
+        } else {
+            console.log('⚠️ No session credentials found in Database. Fresh QR code required.');
+        }
+
         const { state, saveCreds } = await useMultiFileAuthState('auth_info');
         const { version } = await fetchLatestBaileysVersion();
         
@@ -159,10 +175,9 @@ async function connectToWhatsApp() {
                 console.log('📱 New QR Code Generated');
             }
             if (connection === 'open') {
-                console.log('✅ Bot is Online!');
+                console.log('✅ Bot is Online & Fully Authenticated!');
                 currentQR = null;
                 reconnectAttempts = 0;
-                console.log('🤖 Connected to PHP server at:', API_URL);
                 scheduleDailyReminder();
             }
             if (connection === 'close') {
@@ -172,10 +187,8 @@ async function connectToWhatsApp() {
                     reconnectAttempts++;
                     if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
                         const delay = Math.min(5000 * reconnectAttempts, 30000);
-                        console.log(`🔄 Reconnecting in ${delay/1000}s (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
                         setTimeout(connectToWhatsApp, delay);
                     } else {
-                        console.log('🚨 Too many failures. Restarting service...');
                         setTimeout(() => process.exit(1), 3000);
                     }
                 } else {
@@ -184,7 +197,20 @@ async function connectToWhatsApp() {
             }
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        // 3. Keep database and server in sync whenever credentials refresh
+        sock.ev.on('creds.update', async () => {
+            await saveCreds(); // Saves locally first
+            try {
+                if (fs.existsSync('auth_info/creds.json')) {
+                    const currentCredsStr = fs.readFileSync('auth_info/creds.json', 'utf8');
+                    // Silently post structural session states back to MySQL
+                    await apiRequest('save_session', 'POST', { session: currentCredsStr });
+                }
+            } catch (err) {
+                console.error('❌ Failed to update session backup in DB:', err.message);
+            }
+        });
+
         sock.ev.on('messages.upsert', async (m) => await handleCommands(sock, m));
     } catch (error) {
         console.error('❌ Connect Error:', error);
@@ -412,7 +438,6 @@ async function handleLeaderboardCommand(sock, from, waNumber) {
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-            // Fixed: changed responseText to response below
             response += `${medal} ${name}: ${user.total_points || 0} pts${isYou}\n   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
         });
         response += `\n📱 Full leaderboard: ${WEB_URL}/leaderboard.php`;
