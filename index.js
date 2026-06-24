@@ -73,8 +73,10 @@ async function registerUserOnServer(waNumber, name = '', profilePic = '') {
 app.use(express.json());
 app.use(express.static('public'));
 
-app.get('/ping', (req, res) => res.status(200).send('OK'));
-app.get('/health', (req, res) => res.status(200).send('OK'));
+
+
+app.get('/ping', (req, res) => res.status(200).json({}));
+app.get('/health', (req, res) => res.status(200).json({}));
 app.get('/debug', (req, res) => {
     res.json({
         status: 'alive',
@@ -410,7 +412,8 @@ async function handleLeaderboardCommand(sock, from, waNumber) {
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-            responseText += `${medal} ${name}: ${user.total_points || 0} pts${isYou}\n   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
+            // Fixed: changed responseText to response below
+            response += `${medal} ${name}: ${user.total_points || 0} pts${isYou}\n   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
         });
         response += `\n📱 Full leaderboard: ${WEB_URL}/leaderboard.php`;
         await sock.sendMessage(from, { text: response });
