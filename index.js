@@ -138,8 +138,24 @@ setTimeout(keepAlive, 15000);
 
 // ==================== AUTO RESTART LOGIC / CONNECTION ====================
 async function connectToWhatsApp() {
-    console.log('🔄 Connecting to WhatsApp...');
+    console.log('🔄 Connecting to WhatsApp via DB Session Management...');
     try {
+        // 1. Ensure the directory structures exist safely
+        if (!fs.existsSync('auth_info')) {
+            fs.mkdirSync('auth_info');
+        }
+
+        // 2. Fetch credentials from your PHP backend database
+        console.log('📡 Syncing session state from PHP API...');
+        const dbSessionData = await apiRequest('get_session');
+        
+        if (dbSessionData && dbSessionData.session) {
+            console.log('🔑 Active session found in Database. Syncing locally...');
+            fs.writeFileSync('auth_info/creds.json', dbSessionData.session, 'utf8');
+        } else {
+            console.log('⚠️ No session credentials found in Database. Fresh QR code required.');
+        }
+
         const { state, saveCreds } = await useMultiFileAuthState('auth_info');
         const { version } = await fetchLatestBaileysVersion();
         
@@ -159,10 +175,9 @@ async function connectToWhatsApp() {
                 console.log('📱 New QR Code Generated');
             }
             if (connection === 'open') {
-                console.log('✅ Bot is Online!');
+                console.log('✅ Bot is Online & Fully Authenticated!');
                 currentQR = null;
                 reconnectAttempts = 0;
-                console.log('🤖 Connected to PHP server at:', API_URL);
                 scheduleDailyReminder();
             }
             if (connection === 'close') {
@@ -172,10 +187,8 @@ async function connectToWhatsApp() {
                     reconnectAttempts++;
                     if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
                         const delay = Math.min(5000 * reconnectAttempts, 30000);
-                        console.log(`🔄 Reconnecting in ${delay/1000}s (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
                         setTimeout(connectToWhatsApp, delay);
                     } else {
-                        console.log('🚨 Too many failures. Restarting service...');
                         setTimeout(() => process.exit(1), 3000);
                     }
                 } else {
@@ -184,7 +197,20 @@ async function connectToWhatsApp() {
             }
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        // 3. Keep database and server in sync whenever credentials refresh
+        sock.ev.on('creds.update', async () => {
+            await saveCreds(); // Saves locally first
+            try {
+                if (fs.existsSync('auth_info/creds.json')) {
+                    const currentCredsStr = fs.readFileSync('auth_info/creds.json', 'utf8');
+                    // Silently post structural session states back to MySQL
+                    await apiRequest('save_session', 'POST', { session: currentCredsStr });
+                }
+            } catch (err) {
+                console.error('❌ Failed to update session backup in DB:', err.message);
+            }
+        });
+
         sock.ev.on('messages.upsert', async (m) => await handleCommands(sock, m));
     } catch (error) {
         console.error('❌ Connect Error:', error);
