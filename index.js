@@ -73,7 +73,10 @@ async function registerUserOnServer(waNumber, name = '', profilePic = '') {
 app.use(express.json());
 app.use(express.static('public'));
 
-
+// MINIMAL ENDPOINT FOR CRON JOB - RETURNS ONLY "OK"
+app.get('/keep-alive', (req, res) => {
+    res.status(200).send('OK');
+});
 
 app.get('/ping', (req, res) => res.status(200).json({}));
 app.get('/health', (req, res) => res.status(200).json({}));
@@ -117,24 +120,21 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// ==================== KEEP ALIVE ====================
+// ==================== KEEP ALIVE (FIXED FOR FREE TIER) ====================
 async function keepAlive() {
-    const urls = [
-        `http://localhost:${PORT}/ping`,
-        `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'whatsapp-bot-v0ts.onrender.com'}/ping`
-    ];
-    for (const url of urls) {
-        try {
-            await axios.get(url, { timeout: 8000 });
-            console.log(`✅ Keep-alive OK → ${url}`);
-            return;
-        } catch (err) {
-            console.log(`⚠️ Keep-alive failed: ${url}`);
-        }
+    try {
+        // Only ping localhost - this keeps the app awake
+        await axios.get(`http://localhost:${PORT}/keep-alive`, { timeout: 5000 });
+    } catch (err) {
+        // Silent fail - don't log errors to keep output small
+        // This prevents "output too large" error in cron jobs
     }
 }
-setInterval(keepAlive, 4 * 60 * 1000);
-setTimeout(keepAlive, 15000);
+
+// Run keepAlive every 5 minutes (prevents Render from sleeping)
+setInterval(keepAlive, 5 * 60 * 1000);
+// Run once after 10 seconds to start immediately
+setTimeout(keepAlive, 10000);
 
 // ==================== AUTO RESTART LOGIC / CONNECTION ====================
 async function connectToWhatsApp() {
@@ -438,7 +438,6 @@ async function handleLeaderboardCommand(sock, from, waNumber) {
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-            // Fixed: changed responseText to response below
             response += `${medal} ${name}: ${user.total_points || 0} pts${isYou}\n   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
         });
         response += `\n📱 Full leaderboard: ${WEB_URL}/leaderboard.php`;
