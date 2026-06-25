@@ -24,8 +24,13 @@ let matchReminderInterval = null;
 let pointsCheckInterval = null;
 let errorCount = 0;
 const MAX_ERRORS = 10;
-let sentMatchReminders = {}; // Track which matches we've sent reminders for
-let sentPointsAnnouncements = {}; // Track which matches we've announced points for
+let sentMatchReminders = {};
+let sentPointsAnnouncements = {};
+
+// ==================== CACHE SYSTEM ====================
+let matchesCache = [];
+let lastCacheUpdate = null;
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 // ==================== HELPER FUNCTIONS ====================
 function getUserId(jid) {
@@ -69,7 +74,52 @@ function getStatusEmoji(status) {
     return statusMap[status] || '⏳';
 }
 
-// ==================== API FUNCTIONS ====================
+// ==================== CACHED API FUNCTIONS ====================
+async function getMatchesWithCache(forceRefresh = false) {
+    const now = Date.now();
+    
+    // Return cached data if valid
+    if (!forceRefresh && lastCacheUpdate && (now - lastCacheUpdate) < CACHE_TTL) {
+        console.log(`📊 Using cached matches (${matchesCache.length} matches)`);
+        return matchesCache;
+    }
+    
+    // Fetch fresh data
+    console.log('📡 Fetching fresh matches data...');
+    const data = await apiRequest('get_matches');
+    
+    if (data && Array.isArray(data)) {
+        matchesCache = data;
+        lastCacheUpdate = now;
+        console.log(`✅ Cached ${matchesCache.length} matches`);
+    } else {
+        // If API fails, return cached data if available
+        if (matchesCache.length > 0) {
+            console.log('⚠️ API failed, using stale cache');
+            return matchesCache;
+        }
+        matchesCache = [];
+    }
+    
+    return matchesCache;
+}
+
+async function getUpcomingMatchesWithCache() {
+    const allMatches = await getMatchesWithCache();
+    const now = new Date();
+    
+    return allMatches.filter(m => {
+        if (!m.kickoff) return false;
+        const kickoff = new Date(m.kickoff);
+        return kickoff > now && m.status !== 'completed';
+    });
+}
+
+async function getCompletedMatchesWithCache() {
+    const allMatches = await getMatchesWithCache();
+    return allMatches.filter(m => m.status === 'completed');
+}
+
 async function apiRequest(endpoint, method = 'GET', data = null) {
     try {
         const config = {
@@ -91,6 +141,7 @@ async function apiRequest(endpoint, method = 'GET', data = null) {
     }
 }
 
+// ==================== API FUNCTIONS ====================
 async function getLeaderboardFromServer() { return await apiRequest('get_leaderboard'); }
 async function getMatchVotesFromServer(matchId) { return await apiRequest(`get_votes&match_id=${matchId}`); }
 async function getActiveMatchFromServer() { return await apiRequest('get_active_match'); }
@@ -102,12 +153,10 @@ async function registerUserOnServer(waNumber, name = '', profilePic = '') {
     console.log(`📝 Registering: ${waNumber}, Name: ${name}, Has Pic: ${profilePic ? '✅' : '❌'}`);
     return await apiRequest('register_user', 'POST', { wa_number: waNumber, name: name, profile_pic: profilePic });
 }
-async function getUpcomingMatchesFromServer() { return await apiRequest('get_upcoming_matches'); }
 async function getActiveMatchCount() {
-    const matches = await getMatchesFromServer();
+    const matches = await getMatchesWithCache();
     return matches ? matches.filter(m => m.status === 'active').length : 0;
 }
-async function getCompletedMatchesFromServer() { return await apiRequest('get_completed_matches'); }
 
 // ==================== EXPRESS ROUTES ====================
 app.use(express.json());
@@ -124,7 +173,11 @@ app.get('/debug', (req, res) => {
         status: 'alive',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        bot: sock ? 'connected' : 'disconnected'
+        bot: sock ? 'connected' : 'disconnected',
+        cache: {
+            matches: matchesCache.length,
+            lastUpdate: lastCacheUpdate ? new Date(lastCacheUpdate).toISOString() : null
+        }
     });
 });
 
@@ -235,6 +288,8 @@ async function connectToWhatsApp() {
                 scheduleDailyReminder();
                 scheduleMatchReminders();
                 schedulePointsAnnouncements();
+                // Initial cache warmup
+                await getMatchesWithCache(true);
             }
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -383,16 +438,21 @@ function scheduleDailyReminder() {
     }, msUntilTarget);
 }
 
-// ==================== 🆕 MATCH REMINDER (1 Hour Before Kickoff) ====================
+// ==================== MATCH REMINDER (1 Hour Before Kickoff) ====================
 async function checkAndSendMatchReminders() {
     try {
         console.log('⏰ Checking for upcoming match reminders...');
-        const matches = await getUpcomingMatchesFromServer();
-        if (!matches || matches.length === 0) return;
+        const matches = await getUpcomingMatchesWithCache();
+        if (!matches || matches.length === 0) {
+            console.log('📊 No upcoming matches found');
+            return;
+        }
 
         const now = new Date();
         const groupIds = await getGroupIds();
         if (groupIds.length === 0) return;
+
+        let remindersSent = 0;
 
         for (const match of matches) {
             // Skip if we already sent a reminder for this match
@@ -401,7 +461,7 @@ async function checkAndSendMatchReminders() {
             const kickoff = new Date(match.kickoff);
             const timeDiff = (kickoff - now) / (1000 * 60); // Minutes until kickoff
 
-            // Send reminder when match is 60-65 minutes away (to avoid multiple sends)
+            // Send reminder when match is 60-65 minutes away
             if (timeDiff > 55 && timeDiff <= 65) {
                 const message = `⏰ *Match Starting Soon!*\n\n` +
                     `⚽ ${match.team1} vs ${match.team2}\n` +
@@ -422,8 +482,9 @@ async function checkAndSendMatchReminders() {
 
                 // Mark as sent
                 sentMatchReminders[match.id] = true;
+                remindersSent++;
                 
-                // Clean up old entries (keep only last 50)
+                // Clean up old entries (keep last 50)
                 const keys = Object.keys(sentMatchReminders);
                 if (keys.length > 50) {
                     const sorted = keys.sort();
@@ -431,6 +492,10 @@ async function checkAndSendMatchReminders() {
                     toRemove.forEach(key => delete sentMatchReminders[key]);
                 }
             }
+        }
+
+        if (remindersSent > 0) {
+            console.log(`✅ Sent ${remindersSent} match reminders`);
         }
     } catch (error) {
         console.error('❌ Error checking match reminders:', error);
@@ -443,19 +508,19 @@ function scheduleMatchReminders() {
         matchReminderInterval = null;
     }
     
-    console.log('⏰ Match reminder checker scheduled (runs every 2 minutes)');
+    console.log('⏰ Match reminder checker scheduled (runs every 10 minutes)');
     matchReminderInterval = setInterval(() => {
         safeExecute(checkAndSendMatchReminders, 'checkAndSendMatchReminders');
-    }, 2 * 60 * 1000); // Check every 2 minutes
+    }, 10 * 60 * 1000); // 10 minutes
 }
 
-// ==================== 🆕 POINTS ANNOUNCEMENT ====================
+// ==================== POINTS ANNOUNCEMENT ====================
 async function checkAndSendPointsAnnouncements() {
     try {
         console.log('🏆 Checking for new match results to announce...');
         
-        // Get completed matches from your API
-        const matches = await getMatchesFromServer();
+        // Get cached matches
+        const matches = await getMatchesWithCache();
         if (!matches || matches.length === 0) return;
 
         // Filter for completed matches that have scores
@@ -465,10 +530,15 @@ async function checkAndSendPointsAnnouncements() {
             m.away_score !== undefined
         );
 
-        if (completedMatches.length === 0) return;
+        if (completedMatches.length === 0) {
+            console.log('📊 No completed matches found');
+            return;
+        }
 
         const groupIds = await getGroupIds();
         if (groupIds.length === 0) return;
+
+        let announcementsSent = 0;
 
         for (const match of completedMatches) {
             // Skip if we already announced points for this match
@@ -535,6 +605,7 @@ async function checkAndSendPointsAnnouncements() {
 
             // Mark as announced
             sentPointsAnnouncements[match.id] = true;
+            announcementsSent++;
 
             // Clean up old entries
             const keys = Object.keys(sentPointsAnnouncements);
@@ -543,6 +614,10 @@ async function checkAndSendPointsAnnouncements() {
                 const toRemove = sorted.slice(0, keys.length - 50);
                 toRemove.forEach(key => delete sentPointsAnnouncements[key]);
             }
+        }
+
+        if (announcementsSent > 0) {
+            console.log(`✅ Sent ${announcementsSent} points announcements`);
         }
     } catch (error) {
         console.error('❌ Error checking points announcements:', error);
@@ -555,10 +630,10 @@ function schedulePointsAnnouncements() {
         pointsCheckInterval = null;
     }
     
-    console.log('🏆 Points announcement checker scheduled (runs every 5 minutes)');
+    console.log('🏆 Points announcement checker scheduled (runs every 10 minutes)');
     pointsCheckInterval = setInterval(() => {
         safeExecute(checkAndSendPointsAnnouncements, 'checkAndSendPointsAnnouncements');
-    }, 5 * 60 * 1000); // Check every 5 minutes
+    }, 10 * 60 * 1000); // 10 minutes
 }
 
 // ==================== COMMAND HANDLERS ====================
@@ -743,7 +818,7 @@ async function handlePointsCommand(sock, from, waNumber) {
 // !schedule - Today's matches
 async function handleScheduleCommand(sock, from) {
     try {
-        const matches = await getUpcomingMatchesFromServer();
+        const matches = await getUpcomingMatchesWithCache();
         
         if (!matches || matches.length === 0) {
             return await sock.sendMessage(from, { text: '📅 No upcoming matches scheduled.' });
@@ -778,18 +853,14 @@ async function handleScheduleCommand(sock, from) {
 // !results - Match results (renamed from matchstatus)
 async function handleResultsCommand(sock, from) {
     try {
-        const matches = await getMatchesFromServer();
-        if (!matches || matches.length === 0) return await sock.sendMessage(from, { text: '📋 No matches available!' });
-
-        // Get completed matches
-        const completed = matches.filter(m => m.status === 'completed');
+        const matches = await getCompletedMatchesWithCache();
         
-        if (completed.length === 0) {
+        if (matches.length === 0) {
             return await sock.sendMessage(from, { text: '📋 No completed matches yet.' });
         }
 
         let responseText = '📋 *Match Results*\n\n';
-        completed.slice(-5).reverse().forEach(m => {
+        matches.slice(-5).reverse().forEach(m => {
             const winner = m.winner || 'Draw';
             const score = m.score || `${m.home_score || 0}-${m.away_score || 0}`;
             responseText += `⚽ ${m.team1} vs ${m.team2}\n`;
@@ -837,8 +908,10 @@ async function handleStatusCommand(sock, from) {
             `⏰ Uptime: ${Math.floor(process.uptime() / 60)} minutes\n` +
             `👥 Groups: ${groupIds.length}\n` +
             `📊 Active matches: ${activeMatches}\n` +
+            `📊 Cached matches: ${matchesCache.length}\n` +
             `⏰ Daily reminder: 11:00 AM UAE time\n` +
-            `⏰ Match reminders: 1 hour before kickoff\n\n` +
+            `⏰ Match reminders: 1 hour before kickoff (every 10 min)\n` +
+            `🏆 Points announcements: Every 10 min\n\n` +
             `📱 ${WEB_URL}`;
         
         await sock.sendMessage(from, { text: status });
@@ -870,7 +943,8 @@ async function handleHelpCommand(sock, from) {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📱 Bot will send daily reminder at 11:00 AM UAE time`);
-    console.log(`⏰ Match reminders: 1 hour before kickoff (every 2 minutes)`);
-    console.log(`🏆 Points announcements: every 5 minutes`);
+    console.log(`⏰ Match reminders: 1 hour before kickoff (every 10 minutes)`);
+    console.log(`🏆 Points announcements: Every 10 minutes`);
+    console.log(`📊 Cache TTL: 30 minutes`);
     connectToWhatsApp();
 });
