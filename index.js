@@ -18,6 +18,14 @@ let sock;
 let currentQR = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
+let reminderScheduled = false;
+let reminderInterval = null;
+let matchReminderInterval = null;
+let pointsCheckInterval = null;
+let errorCount = 0;
+const MAX_ERRORS = 10;
+let sentMatchReminders = {}; // Track which matches we've sent reminders for
+let sentPointsAnnouncements = {}; // Track which matches we've announced points for
 
 // ==================== HELPER FUNCTIONS ====================
 function getUserId(jid) {
@@ -33,6 +41,32 @@ async function fetchProfilePicture(sock, jid) {
     } catch (error) {
         return '';
     }
+}
+
+function formatTime(timeString) {
+    if (!timeString || timeString === 'TBD') return 'TBD';
+    try {
+        const date = new Date(timeString);
+        return date.toLocaleTimeString('en-US', { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            timeZone: 'Asia/Dubai'
+        });
+    } catch {
+        return timeString;
+    }
+}
+
+function getStatusEmoji(status) {
+    const statusMap = {
+        'live': '🔴',
+        'in_progress': '🔴',
+        'halftime': '⏸️',
+        'completed': '✅',
+        'scheduled': '⏳',
+        'active': '🟢'
+    };
+    return statusMap[status] || '⏳';
 }
 
 // ==================== API FUNCTIONS ====================
@@ -68,12 +102,17 @@ async function registerUserOnServer(waNumber, name = '', profilePic = '') {
     console.log(`📝 Registering: ${waNumber}, Name: ${name}, Has Pic: ${profilePic ? '✅' : '❌'}`);
     return await apiRequest('register_user', 'POST', { wa_number: waNumber, name: name, profile_pic: profilePic });
 }
+async function getUpcomingMatchesFromServer() { return await apiRequest('get_upcoming_matches'); }
+async function getActiveMatchCount() {
+    const matches = await getMatchesFromServer();
+    return matches ? matches.filter(m => m.status === 'active').length : 0;
+}
+async function getCompletedMatchesFromServer() { return await apiRequest('get_completed_matches'); }
 
 // ==================== EXPRESS ROUTES ====================
 app.use(express.json());
 app.use(express.static('public'));
 
-// MINIMAL ENDPOINT FOR CRON JOB - RETURNS ONLY "OK"
 app.get('/keep-alive', (req, res) => {
     res.status(200).send('OK');
 });
@@ -90,7 +129,7 @@ app.get('/debug', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    const clickToChatLink = `https://wa.me/${BOT_NUMBER}?text=!vote`;
+    const clickToChatLink = `https://wa.me/${BOT_NUMBER}?text=!help`;
     res.send(`
         <h1>✅ WhatsApp Bot is Running!</h1>
         <p><a href="/qr" target="_blank"><b>👉 Click Here to Scan QR Code</b></a></p>
@@ -120,32 +159,46 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// ==================== KEEP ALIVE (FIXED FOR FREE TIER) ====================
+// ==================== KEEP ALIVE ====================
 async function keepAlive() {
     try {
-        // Only ping localhost - this keeps the app awake
         await axios.get(`http://localhost:${PORT}/keep-alive`, { timeout: 5000 });
     } catch (err) {
-        // Silent fail - don't log errors to keep output small
-        // This prevents "output too large" error in cron jobs
+        // Silent fail
     }
 }
 
-// Run keepAlive every 5 minutes (prevents Render from sleeping)
 setInterval(keepAlive, 5 * 60 * 1000);
-// Run once after 10 seconds to start immediately
 setTimeout(keepAlive, 10000);
 
-// ==================== AUTO RESTART LOGIC / CONNECTION ====================
+// ==================== SAFE EXECUTE WRAPPER ====================
+async function safeExecute(fn, name) {
+    try {
+        await fn();
+        errorCount = 0;
+    } catch (error) {
+        errorCount++;
+        console.error(`❌ Error in ${name}:`, error.message);
+        
+        if (errorCount >= MAX_ERRORS && sock) {
+            try {
+                await sock.sendMessage(`${BOT_NUMBER}@s.whatsapp.net`, {
+                    text: `⚠️ *Alert:* Bot has encountered ${MAX_ERRORS} errors in ${name}. Please check logs.`
+                });
+            } catch (e) {}
+            errorCount = 0;
+        }
+    }
+}
+
+// ==================== AUTO RESTART LOGIC ====================
 async function connectToWhatsApp() {
     console.log('🔄 Connecting to WhatsApp via DB Session Management...');
     try {
-        // 1. Ensure the directory structures exist safely
         if (!fs.existsSync('auth_info')) {
             fs.mkdirSync('auth_info');
         }
 
-        // 2. Fetch credentials from your PHP backend database
         console.log('📡 Syncing session state from PHP API...');
         const dbSessionData = await apiRequest('get_session');
         
@@ -178,7 +231,10 @@ async function connectToWhatsApp() {
                 console.log('✅ Bot is Online & Fully Authenticated!');
                 currentQR = null;
                 reconnectAttempts = 0;
+                reminderScheduled = false;
                 scheduleDailyReminder();
+                scheduleMatchReminders();
+                schedulePointsAnnouncements();
             }
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -197,13 +253,11 @@ async function connectToWhatsApp() {
             }
         });
 
-        // 3. Keep database and server in sync whenever credentials refresh
         sock.ev.on('creds.update', async () => {
-            await saveCreds(); // Saves locally first
+            await saveCreds();
             try {
                 if (fs.existsSync('auth_info/creds.json')) {
                     const currentCredsStr = fs.readFileSync('auth_info/creds.json', 'utf8');
-                    // Silently post structural session states back to MySQL
                     await apiRequest('save_session', 'POST', { session: currentCredsStr });
                 }
             } catch (err) {
@@ -211,7 +265,7 @@ async function connectToWhatsApp() {
             }
         });
 
-        sock.ev.on('messages.upsert', async (m) => await handleCommands(sock, m));
+        sock.ev.on('messages.upsert', async (m) => await safeExecute(() => handleCommands(sock, m), 'handleCommands'));
     } catch (error) {
         console.error('❌ Connect Error:', error);
         reconnectAttempts++;
@@ -258,32 +312,253 @@ async function sendDailyReminder() {
     try {
         console.log('⏰ Sending daily reminder...');
         const groupIds = await getGroupIds();
-        if (groupIds.length === 0) return;
-        const clickToChatLink = `https://wa.me/${BOT_NUMBER}?text=!vote`;
-        const message = `🌅 *Good Morning!* 🌅\n\n⚽ *World Cup Predictions*\n\nType *!vote* to get your personal voting link!\nOr click: ${clickToChatLink}\n\n📊 Standings: ${WEB_URL}/leaderboard.php\nGood luck! 🍀`;
+        if (groupIds.length === 0) {
+            console.log('⚠️ No groups found, skipping reminder');
+            return;
+        }
+        
+        const pollLink = `${WEB_URL}/vote.php`;
+        let matchInfo = '';
+        try {
+            const response = await axios.get(`${API_URL}?action=get_today_matches`);
+            const data = response.data;
+            if (data.success && data.count > 0) {
+                matchInfo = '\n\n📅 *Today\'s Matches:*\n';
+                data.matches.slice(0, 5).forEach(m => {
+                    const time = m.kickoff || m.date || 'TBD';
+                    matchInfo += `• ${m.homeTeam} vs ${m.awayTeam} (${formatTime(time)})\n`;
+                });
+                if (data.count > 5) {
+                    matchInfo += `\n... and ${data.count - 5} more matches`;
+                }
+            }
+        } catch (e) {}
+        
+        const message = `🌅 *Good Morning!* 🌅\n\n⚽ *World Cup Predictions*\n\n📊 *Today's Poll is Open!*\n\nClick below to submit your predictions:\n🔗 ${pollLink}\n${matchInfo}\n\n📊 Rankings: ${WEB_URL}/leaderboard.php\n\nGood luck! 🍀`;
+        
         for (const groupId of groupIds) {
             try {
                 await sock.sendMessage(groupId, { text: message });
+                console.log(`✅ Reminder sent to: ${groupId}`);
                 await new Promise(resolve => setTimeout(resolve, 1000));
-            } catch (error) {}
+            } catch (error) {
+                console.error(`❌ Failed to send to ${groupId}:`, error.message);
+            }
         }
     } catch (error) {
-        console.error('Error sending daily reminder:', error);
+        console.error('❌ Error sending daily reminder:', error);
     }
 }
 
 function scheduleDailyReminder() {
+    if (reminderScheduled) {
+        console.log('⏰ Daily reminder already scheduled, skipping...');
+        return;
+    }
+    
+    if (reminderInterval) {
+        clearInterval(reminderInterval);
+        reminderInterval = null;
+    }
+    
     const now = new Date();
     const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
     const targetTime = new Date(uaeTime);
-    targetTime.setHours(9, 0, 0, 0);
-    if (uaeTime > targetTime) targetTime.setDate(targetTime.getDate() + 1);
+    targetTime.setHours(11, 0, 0, 0);
+    
+    if (uaeTime > targetTime) {
+        targetTime.setDate(targetTime.getDate() + 1);
+    }
+    
     const msUntilTarget = targetTime.getTime() - uaeTime.getTime();
-    console.log(`⏰ Next daily reminder scheduled for UAE Time: ${targetTime.toLocaleString('en-US', { timeZone: 'Asia/Dubai' })}`);
+    
+    console.log(`⏰ Daily reminder scheduled for: ${targetTime.toLocaleString('en-US', { timeZone: 'Asia/Dubai' })}`);
+    console.log(`⏰ Will run in ${Math.round(msUntilTarget / 60000)} minutes`);
+    
+    reminderScheduled = true;
+    
     setTimeout(() => {
         sendDailyReminder();
-        setInterval(sendDailyReminder, 24 * 60 * 60 * 1000);
+        reminderInterval = setInterval(sendDailyReminder, 24 * 60 * 60 * 1000);
     }, msUntilTarget);
+}
+
+// ==================== 🆕 MATCH REMINDER (1 Hour Before Kickoff) ====================
+async function checkAndSendMatchReminders() {
+    try {
+        console.log('⏰ Checking for upcoming match reminders...');
+        const matches = await getUpcomingMatchesFromServer();
+        if (!matches || matches.length === 0) return;
+
+        const now = new Date();
+        const groupIds = await getGroupIds();
+        if (groupIds.length === 0) return;
+
+        for (const match of matches) {
+            // Skip if we already sent a reminder for this match
+            if (sentMatchReminders[match.id]) continue;
+
+            const kickoff = new Date(match.kickoff);
+            const timeDiff = (kickoff - now) / (1000 * 60); // Minutes until kickoff
+
+            // Send reminder when match is 60-65 minutes away (to avoid multiple sends)
+            if (timeDiff > 55 && timeDiff <= 65) {
+                const message = `⏰ *Match Starting Soon!*\n\n` +
+                    `⚽ ${match.team1} vs ${match.team2}\n` +
+                    `⏰ Kickoff in ${Math.round(timeDiff)} minutes\n` +
+                    `📊 ${getStatusEmoji('active')} Status: Upcoming\n\n` +
+                    `🗳️ Don't forget to vote!\n` +
+                    `🔗 ${WEB_URL}/vote.php`;
+
+                for (const groupId of groupIds) {
+                    try {
+                        await sock.sendMessage(groupId, { text: message });
+                        console.log(`✅ Match reminder sent for: ${match.team1} vs ${match.team2}`);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    } catch (error) {
+                        console.error(`❌ Failed to send match reminder to ${groupId}:`, error.message);
+                    }
+                }
+
+                // Mark as sent
+                sentMatchReminders[match.id] = true;
+                
+                // Clean up old entries (keep only last 50)
+                const keys = Object.keys(sentMatchReminders);
+                if (keys.length > 50) {
+                    const sorted = keys.sort();
+                    const toRemove = sorted.slice(0, keys.length - 50);
+                    toRemove.forEach(key => delete sentMatchReminders[key]);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error checking match reminders:', error);
+    }
+}
+
+function scheduleMatchReminders() {
+    if (matchReminderInterval) {
+        clearInterval(matchReminderInterval);
+        matchReminderInterval = null;
+    }
+    
+    console.log('⏰ Match reminder checker scheduled (runs every 2 minutes)');
+    matchReminderInterval = setInterval(() => {
+        safeExecute(checkAndSendMatchReminders, 'checkAndSendMatchReminders');
+    }, 2 * 60 * 1000); // Check every 2 minutes
+}
+
+// ==================== 🆕 POINTS ANNOUNCEMENT ====================
+async function checkAndSendPointsAnnouncements() {
+    try {
+        console.log('🏆 Checking for new match results to announce...');
+        
+        // Get completed matches from your API
+        const matches = await getMatchesFromServer();
+        if (!matches || matches.length === 0) return;
+
+        // Filter for completed matches that have scores
+        const completedMatches = matches.filter(m => 
+            m.status === 'completed' && 
+            m.home_score !== undefined && 
+            m.away_score !== undefined
+        );
+
+        if (completedMatches.length === 0) return;
+
+        const groupIds = await getGroupIds();
+        if (groupIds.length === 0) return;
+
+        for (const match of completedMatches) {
+            // Skip if we already announced points for this match
+            if (sentPointsAnnouncements[match.id]) continue;
+
+            // Check if it was recently completed (within last 2 hours)
+            const lastUpdate = new Date(match.last_score_update || match.updated_at || Date.now());
+            const timeSinceUpdate = (Date.now() - lastUpdate.getTime()) / (1000 * 60); // Minutes
+
+            if (timeSinceUpdate > 120) {
+                // Too old, mark as announced to avoid future checks
+                sentPointsAnnouncements[match.id] = true;
+                continue;
+            }
+
+            // Get votes for this match to calculate stats
+            const votes = await getMatchVotesFromServer(match.id) || [];
+            const totalVotes = votes.length;
+            const correctVotes = votes.filter(v => v.points_earned === 3).length;
+            const wrongVotes = totalVotes - correctVotes;
+
+            // Get top 3 users who got it right
+            const correctUsers = votes
+                .filter(v => v.points_earned === 3)
+                .slice(0, 3)
+                .map(v => v.name || v.wa_number);
+
+            const winner = match.winner || 'Draw';
+            const score = match.score || `${match.home_score || 0}-${match.away_score || 0}`;
+
+            let message = `🏆 *Match Result Announced!*\n\n` +
+                `⚽ ${match.team1} vs ${match.team2}\n` +
+                `📊 Score: ${score}\n` +
+                `🏅 Winner: ${winner}\n\n` +
+                `📈 *Voting Stats:*\n` +
+                `✅ Correct predictions: ${correctVotes}\n` +
+                `❌ Wrong predictions: ${wrongVotes}\n` +
+                `📊 Total votes: ${totalVotes}\n`;
+
+            if (correctUsers.length > 0) {
+                message += `\n👏 *Top Predictors:*\n`;
+                correctUsers.forEach((user, i) => {
+                    message += `${i+1}. ${user}\n`;
+                });
+            }
+
+            if (winner !== 'Draw') {
+                message += `\n🎯 ${correctVotes} users earned 3 points!`;
+            } else {
+                message += `\n🤝 Match ended in a draw. No points awarded.`;
+            }
+
+            message += `\n\n📊 Check rankings: ${WEB_URL}/leaderboard.php`;
+
+            for (const groupId of groupIds) {
+                try {
+                    await sock.sendMessage(groupId, { text: message });
+                    console.log(`✅ Points announcement sent for: ${match.team1} vs ${match.team2}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } catch (error) {
+                    console.error(`❌ Failed to send points announcement to ${groupId}:`, error.message);
+                }
+            }
+
+            // Mark as announced
+            sentPointsAnnouncements[match.id] = true;
+
+            // Clean up old entries
+            const keys = Object.keys(sentPointsAnnouncements);
+            if (keys.length > 50) {
+                const sorted = keys.sort();
+                const toRemove = sorted.slice(0, keys.length - 50);
+                toRemove.forEach(key => delete sentPointsAnnouncements[key]);
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error checking points announcements:', error);
+    }
+}
+
+function schedulePointsAnnouncements() {
+    if (pointsCheckInterval) {
+        clearInterval(pointsCheckInterval);
+        pointsCheckInterval = null;
+    }
+    
+    console.log('🏆 Points announcement checker scheduled (runs every 5 minutes)');
+    pointsCheckInterval = setInterval(() => {
+        safeExecute(checkAndSendPointsAnnouncements, 'checkAndSendPointsAnnouncements');
+    }, 5 * 60 * 1000); // Check every 5 minutes
 }
 
 // ==================== COMMAND HANDLERS ====================
@@ -307,18 +582,22 @@ async function handleCommands(sock, msg) {
         const parts = text.split(' ');
         const command = parts[0].toLowerCase();
         
+        // === COMMANDS ===
         if (command === '!vote') return await handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName);
         if (command === '!poll') return await handlePollCommand(sock, from);
-        if (command === '!leaderboard' || command === '!standings') return await handleLeaderboardCommand(sock, from, waNumber);
-        if (command === '!points') return await handleLeaderboardCommand(sock, from, waNumber);
-        if (command === '!matches') return await handleMatchesCommand(sock, from, waNumber);
-        if (command === '!matchstatus' || command === '!votes') return await handleMatchStatusCommand(sock, from, waNumber);
+        if (command === '!rank' || command === '!leaderboard') return await handleRankCommand(sock, from, waNumber);
+        if (command === '!points' || command === '!mypoints') return await handlePointsCommand(sock, from, waNumber);
+        if (command === '!schedule') return await handleScheduleCommand(sock, from);
+        if (command === '!results') return await handleResultsCommand(sock, from);
         if (command === '!stats') return await handleStatsCommand(sock, from, waNumber);
+        if (command === '!status') return await handleStatusCommand(sock, from);
         if (command === '!help' || command === '!menu') return await handleHelpCommand(sock, from);
     }
 }
 
-// ==================== INDIVIDUAL COMMAND ACTIONS ====================
+// ==================== COMMAND FUNCTIONS ====================
+
+// !vote - Get voting link
 async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName) {
     const votingLink = `${WEB_URL}/vote.php?wa=${waNumber}`;
     try {
@@ -334,61 +613,51 @@ async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayN
         if (isGroup) await sock.sendMessage(from, { text: `✅ I've sent your personal voting link via private message. Check your DMs! 📩` });
     } catch (error) {
         console.error('Error in vote command:', error);
+        await sock.sendMessage(from, { text: '⚠️ Error generating voting link. Please try again.' });
     }
 }
 
+// !poll - View poll status
 async function handlePollCommand(sock, from) {
     try {
-        // 1. Get all polls from server
         const polls = await getPollsFromServer();
         if (!polls || polls.length === 0) {
             return await sock.sendMessage(from, { text: "❌ No polls available right now." });
         }
 
-        // 2. Filter for the active poll
         const activePollSummary = polls.find(p => p.status === 'active');
         if (!activePollSummary) {
             return await sock.sendMessage(from, { text: "❌ No active polls found at the moment." });
         }
 
-        // 3. Fetch detailed poll information containing match data arrays
         const activePoll = await getPollDetailsFromServer(activePollSummary.id);
         if (!activePoll || !activePoll.matches || activePoll.matches.length === 0) {
             return await sock.sendMessage(from, { text: `📋 *${activePollSummary.name}*\n\nNo matches found in this poll execution.` });
         }
 
-        // 4. Get global user leaderboard to reference all registered users
         const leaderboardUsers = await getLeaderboardFromServer() || [];
         
         let responseText = `📝 *${activePoll.name}*\n\n`;
         let index = 1;
         let totalMentions = [];
 
-        // 5. Loop through each match in the active poll
         for (const match of activePoll.matches) {
             if (!match) continue;
             
             responseText += `*Match ${index}:*\n⚽ ${match.team1} vs ${match.team2}\n`;
 
-            // Fetch live submissions for this match item (contains raw wa_number system IDs)
             const votes = await getMatchVotesFromServer(match.id) || [];
             const votedUserIds = votes.map(v => String(v.wa_number));
 
-            // Find missing voters
             let missingVotersNames = [];
             leaderboardUsers.forEach(user => {
-                const userIdStr = String(user.wa_number); // System ID (e.g., "80754444869651")
+                const userIdStr = String(user.wa_number);
                 
                 if (!votedUserIds.includes(userIdStr)) {
-                    
-                    // 1. Add their real Name to the text list
                     missingVotersNames.push(user.name);
-
-                    // 2. Extract their stored physical mobile phone number for the blue notification tag
                     if (user.mob_number) {
                         const cleanMobile = String(user.mob_number).replace(/\D/g, '');
                         const mentionJid = `${cleanMobile}@s.whatsapp.net`;
-
                         if (!totalMentions.includes(mentionJid)) {
                             totalMentions.push(mentionJid);
                         }
@@ -406,7 +675,6 @@ async function handlePollCommand(sock, from) {
 
         responseText += `🔥 *Vote now! Do not miss out:*\n🔗 ${WEB_URL}/vote.php\n`;
 
-        // 5b. Appends structural tags using the matched mob_number values at the bottom
         if (totalMentions.length > 0) {
             responseText += `\n🔔 *Reminders sent to:* `;
             const tagStrings = totalMentions.map(jid => {
@@ -416,7 +684,6 @@ async function handlePollCommand(sock, from) {
             responseText += tagStrings.join(' ');
         }
 
-        // 6. Dispatch response with explicit native mentions array context
         await sock.sendMessage(from, { 
             text: responseText, 
             mentions: totalMentions 
@@ -424,92 +691,186 @@ async function handlePollCommand(sock, from) {
 
     } catch (error) {
         console.error('Error handling !poll command:', error);
-        await sock.sendMessage(from, { text: "⚠️ Error gathering poll data state." });
+        await sock.sendMessage(from, { text: "⚠️ Error gathering poll data." });
     }
 }
 
-async function handleLeaderboardCommand(sock, from, waNumber) {
+// !rank - Leaderboard (renamed)
+async function handleRankCommand(sock, from, waNumber) {
     try {
         const data = await getLeaderboardFromServer();
         if (!data || data.length === 0) return await sock.sendMessage(from, { text: `📊 No points recorded yet!\n\nStart voting by typing: !vote` });
 
-        let response = '🏆 *Leaderboard*\n\n';
+        let response = '🏆 *Rankings*\n\n';
         data.forEach((user, index) => {
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
             response += `${medal} ${name}: ${user.total_points || 0} pts${isYou}\n   📊 ${user.correct_predictions || 0}/${user.total_predictions || 0} correct\n`;
         });
-        response += `\n📱 Full leaderboard: ${WEB_URL}/leaderboard.php`;
+        response += `\n📱 Full rankings: ${WEB_URL}/leaderboard.php`;
         await sock.sendMessage(from, { text: response });
     } catch (error) {
         console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching rankings. Please try again.' });
     }
 }
 
-async function handleMatchesCommand(sock, from, waNumber) {
+// !points - User's own points
+async function handlePointsCommand(sock, from, waNumber) {
+    try {
+        const user = await getUserStatsFromServer(waNumber);
+        if (!user) return await sock.sendMessage(from, { text: `📊 No stats found. Start voting with !vote` });
+
+        const accuracy = user.total_predictions > 0 ? 
+            Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
+
+        let responseText = `📊 *Your Stats*\n\n` +
+            `👤 Name: ${user.name || 'Not set'}\n` +
+            `⭐ Points: ${user.total_points || 0}\n` +
+            `✅ Correct: ${user.correct_predictions || 0}\n` +
+            `📊 Total predictions: ${user.total_predictions || 0}\n` +
+            `🎯 Accuracy: ${accuracy}%\n\n` +
+            `📱 Full rankings: ${WEB_URL}/leaderboard.php`;
+        
+        await sock.sendMessage(from, { text: responseText });
+    } catch (error) {
+        console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching your stats. Please try again.' });
+    }
+}
+
+// !schedule - Today's matches
+async function handleScheduleCommand(sock, from) {
+    try {
+        const matches = await getUpcomingMatchesFromServer();
+        
+        if (!matches || matches.length === 0) {
+            return await sock.sendMessage(from, { text: '📅 No upcoming matches scheduled.' });
+        }
+
+        // Filter to today's matches only
+        const today = new Date().toDateString();
+        const todayMatches = matches.filter(m => {
+            const matchDate = new Date(m.kickoff).toDateString();
+            return matchDate === today;
+        });
+
+        if (todayMatches.length === 0) {
+            return await sock.sendMessage(from, { text: '📅 No matches scheduled for today.' });
+        }
+
+        let message = '📅 *Today\'s Matches*\n\n';
+        todayMatches.forEach(m => {
+            const time = formatTime(m.kickoff);
+            message += `⚽ ${m.team1} vs ${m.team2}\n`;
+            message += `⏰ ${time}\n\n`;
+        });
+
+        message += `📊 Vote now: ${WEB_URL}/vote.php`;
+        await sock.sendMessage(from, { text: message });
+    } catch (error) {
+        console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching schedule. Please try again.' });
+    }
+}
+
+// !results - Match results (renamed from matchstatus)
+async function handleResultsCommand(sock, from) {
     try {
         const matches = await getMatchesFromServer();
         if (!matches || matches.length === 0) return await sock.sendMessage(from, { text: '📋 No matches available!' });
 
-        let responseText = '📋 *Matches*\n\n';
-        const upcoming = matches.filter(m => m.status === 'active' && new Date(m.kickoff) > new Date());
-        if (upcoming.length > 0) {
-            responseText += '🟢 *Upcoming Matches (Voting Open)*\n';
-            upcoming.forEach(m => { responseText += `📌 *${m.name}*\n   ⏰ ${new Date(m.kickoff).toLocaleString()}\n\n`; });
-        }
+        // Get completed matches
         const completed = matches.filter(m => m.status === 'completed');
-        if (completed.length > 0) {
-            responseText += '🔵 *Completed Matches*\n';
-            completed.slice(-3).forEach(m => { responseText += `📌 ${m.name}\n   🏅 Winner: ${m.winner || 'Unknown'} (${m.score || 'N/A'})\n\n`; });
+        
+        if (completed.length === 0) {
+            return await sock.sendMessage(from, { text: '📋 No completed matches yet.' });
         }
-        responseText += `\n📱 Get your link: !vote`;
+
+        let responseText = '📋 *Match Results*\n\n';
+        completed.slice(-5).reverse().forEach(m => {
+            const winner = m.winner || 'Draw';
+            const score = m.score || `${m.home_score || 0}-${m.away_score || 0}`;
+            responseText += `⚽ ${m.team1} vs ${m.team2}\n`;
+            responseText += `📊 Result: ${score} (${winner})\n\n`;
+        });
+        
+        responseText += `📱 Full results: ${WEB_URL}/matches.php`;
         await sock.sendMessage(from, { text: responseText });
     } catch (error) {
         console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching results. Please try again.' });
     }
 }
 
-async function handleMatchStatusCommand(sock, from, waNumber) {
-    try {
-        const match = await getActiveMatchFromServer();
-        if (!match) return await sock.sendMessage(from, { text: `❌ No active match!` });
-
-        const votes = await getMatchVotesFromServer(match.id);
-        let responseText = `📊 *Voting Status*\n\n📋 ${match.name}\n\n`;
-        const t1Count = votes?.filter(v => v.team_voted === match.team1).length || 0;
-        const t2Count = votes?.filter(v => v.team_voted === match.team2).length || 0;
-        const total = t1Count + t2Count;
-
-        const bar1 = '█'.repeat(Math.min(Math.floor(t1Count / (total || 1) * 15), 15));
-        const bar2 = '█'.repeat(Math.min(Math.floor(t2Count / (total || 1) * 15), 15));
-
-        responseText += `🏆 ${match.team1}\n${bar1 || ' '} ${t1Count} votes\n\n🏆 ${match.team2}\n${bar2 || ' '} ${t2Count} votes\n\n📊 Total: ${total}`;
-        await sock.sendMessage(from, { text: responseText });
-    } catch (error) {
-        console.error(error);
-    }
-}
-
+// !stats - User stats (kept)
 async function handleStatsCommand(sock, from, waNumber) {
     try {
         const user = await getUserStatsFromServer(waNumber);
         if (!user) return await sock.sendMessage(from, { text: `📊 No stats found. Get voting via !vote` });
 
-        let responseText = `📊 *Your Stats*\n\n👤 Name: ${user.name || 'Not set'}\n⭐ Points: ${user.total_points || 0}\n✅ Correct: ${user.correct_predictions || 0}/${user.total_predictions || 0}`;
+        const accuracy = user.total_predictions > 0 ? 
+            Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
+
+        let responseText = `📊 *Your Stats*\n\n` +
+            `👤 Name: ${user.name || 'Not set'}\n` +
+            `⭐ Points: ${user.total_points || 0}\n` +
+            `✅ Correct: ${user.correct_predictions || 0}/${user.total_predictions || 0}\n` +
+            `🎯 Accuracy: ${accuracy}%`;
+        
         await sock.sendMessage(from, { text: responseText });
     } catch (error) {
         console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching your stats. Please try again.' });
     }
 }
 
+// !status - Bot health
+async function handleStatusCommand(sock, from) {
+    try {
+        const groupIds = await getGroupIds();
+        const activeMatches = await getActiveMatchCount();
+        
+        const status = `🤖 *Bot Status*\n\n` +
+            `✅ Connected: ${sock ? 'Yes' : 'No'}\n` +
+            `⏰ Uptime: ${Math.floor(process.uptime() / 60)} minutes\n` +
+            `👥 Groups: ${groupIds.length}\n` +
+            `📊 Active matches: ${activeMatches}\n` +
+            `⏰ Daily reminder: 11:00 AM UAE time\n` +
+            `⏰ Match reminders: 1 hour before kickoff\n\n` +
+            `📱 ${WEB_URL}`;
+        
+        await sock.sendMessage(from, { text: status });
+    } catch (error) {
+        console.error(error);
+        await sock.sendMessage(from, { text: '⚠️ Error fetching status.' });
+    }
+}
+
+// !help - Help menu
 async function handleHelpCommand(sock, from) {
-    let response = '📋 *Available Commands*\n\n!poll - View running group voting stats\n!vote - Get personal submission link\n!matches - Show all match cycles\n!leaderboard - Current top rankings\n!stats - View your points details\n!matchstatus - Check vote distributions';
+    const response = `📋 *Available Commands*\n\n` +
+        `🗳️ *!vote* - Get your voting link\n` +
+        `📊 *!poll* - View current poll status\n` +
+        `🏆 *!rank* - Top rankings\n` +
+        `👤 *!points* - Your points & stats\n` +
+        `📅 *!schedule* - Today's matches\n` +
+        `📋 *!results* - Match results\n` +
+        `📊 *!stats* - Your detailed stats\n` +
+        `🤖 *!status* - Bot health\n` +
+        `ℹ️ *!help* - This menu\n\n` +
+        `⚽ *World Cup 2026*\n` +
+        `📱 ${WEB_URL}`;
+    
     await sock.sendMessage(from, { text: response });
 }
 
 // ==================== START SERVER & BOT ====================
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📱 Bot will send daily reminder at 11:00 AM UAE time`);
+    console.log(`⏰ Match reminders: 1 hour before kickoff (every 2 minutes)`);
+    console.log(`🏆 Points announcements: every 5 minutes`);
     connectToWhatsApp();
 });
