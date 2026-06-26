@@ -78,13 +78,11 @@ function getStatusEmoji(status) {
 async function getMatchesWithCache(forceRefresh = false) {
     const now = Date.now();
     
-    // Return cached data if valid
     if (!forceRefresh && lastCacheUpdate && (now - lastCacheUpdate) < CACHE_TTL) {
         console.log(`📊 Using cached matches (${matchesCache.length} matches)`);
         return matchesCache;
     }
     
-    // Fetch fresh data
     console.log('📡 Fetching fresh matches data...');
     const data = await apiRequest('get_matches');
     
@@ -93,7 +91,6 @@ async function getMatchesWithCache(forceRefresh = false) {
         lastCacheUpdate = now;
         console.log(`✅ Cached ${matchesCache.length} matches`);
     } else {
-        // If API fails, return cached data if available
         if (matchesCache.length > 0) {
             console.log('⚠️ API failed, using stale cache');
             return matchesCache;
@@ -102,22 +99,6 @@ async function getMatchesWithCache(forceRefresh = false) {
     }
     
     return matchesCache;
-}
-
-async function getUpcomingMatchesWithCache() {
-    const allMatches = await getMatchesWithCache();
-    const now = new Date();
-    
-    return allMatches.filter(m => {
-        if (!m.kickoff) return false;
-        const kickoff = new Date(m.kickoff);
-        return kickoff > now && m.status !== 'completed';
-    });
-}
-
-async function getCompletedMatchesWithCache() {
-    const allMatches = await getMatchesWithCache();
-    return allMatches.filter(m => m.status === 'completed');
 }
 
 async function apiRequest(endpoint, method = 'GET', data = null) {
@@ -216,9 +197,7 @@ app.get('/qr', async (req, res) => {
 async function keepAlive() {
     try {
         await axios.get(`http://localhost:${PORT}/keep-alive`, { timeout: 5000 });
-    } catch (err) {
-        // Silent fail
-    }
+    } catch (err) {}
 }
 
 setInterval(keepAlive, 5 * 60 * 1000);
@@ -288,12 +267,9 @@ async function connectToWhatsApp() {
                 await autoDiscoverGroups();
                 
                 reminderScheduled = false;
-                
                 scheduleDailyReminder();
                 scheduleMatchReminders();
                 schedulePointsAnnouncements();
-                
-                // Initial cache warmup
                 await getMatchesWithCache(true);
             }
             if (connection === 'close') {
@@ -364,6 +340,49 @@ async function saveGroup(groupId) {
         }
     } catch (error) {
         console.error('Error saving group:', error);
+    }
+}
+
+// ==================== AUTO DISCOVER GROUPS ====================
+async function autoDiscoverGroups() {
+    try {
+        console.log('🔍 Auto-discovering groups...');
+        
+        if (!sock) {
+            console.log('⚠️ Bot not connected, cannot discover groups');
+            return;
+        }
+        
+        const groups = await sock.groupFetchAllParticipating();
+        
+        if (!groups || Object.keys(groups).length === 0) {
+            console.log('⚠️ No groups found. Bot may not be in any groups yet.');
+            console.log('📝 Please add bot to a group and send !help to save it.');
+            return;
+        }
+        
+        let savedCount = 0;
+        for (const groupId of Object.keys(groups)) {
+            const groupInfo = groups[groupId];
+            if (groupInfo.participants && groupInfo.participants.length > 0) {
+                await saveGroup(groupId);
+                savedCount++;
+                console.log(`📝 Saved group: ${groupId} (${groupInfo.participants.length} members)`);
+            }
+        }
+        
+        console.log(`✅ Auto-discovered and saved ${savedCount} groups`);
+        
+        const groupIds = await getGroupIds();
+        console.log(`📊 Total groups in database: ${groupIds.length}`);
+        
+        if (groupIds.length === 0) {
+            console.log('⚠️ No groups saved. Please add bot to a WhatsApp group.');
+        }
+        
+    } catch (error) {
+        console.error('❌ Error auto-discovering groups:', error);
+        console.log('📝 If error persists, manually add groups to groups.json file');
     }
 }
 
@@ -443,29 +462,39 @@ function scheduleDailyReminder() {
     }, msUntilTarget);
 }
 
-        // ==================== POLL MATCHES FILTER ====================
+// ==================== POLL MATCHES FILTER ====================
 async function getPollMatchIds() {
     try {
-        // Get all active polls
+        console.log('🔍 Fetching poll match IDs...');
         const polls = await getPollsFromServer();
-        if (!polls || polls.length === 0) return [];
+        
+        if (!polls || polls.length === 0) {
+            console.log('📊 No polls found');
+            return [];
+        }
         
         const activePolls = polls.filter(p => p.status === 'active');
-        if (activePolls.length === 0) return [];
+        if (activePolls.length === 0) {
+            console.log('📊 No active polls found');
+            return [];
+        }
+        
+        console.log(`📊 Found ${activePolls.length} active polls`);
         
         let allMatchIds = [];
         
-        // Get match IDs from all active polls
         for (const poll of activePolls) {
             const pollDetails = await getPollDetailsFromServer(poll.id);
             if (pollDetails && pollDetails.matches) {
                 const matchIds = pollDetails.matches.map(m => m.id);
                 allMatchIds = [...allMatchIds, ...matchIds];
+                console.log(`📊 Poll ${poll.id} has ${matchIds.length} matches`);
             }
         }
         
-        // Remove duplicates
-        return [...new Set(allMatchIds)];
+        const uniqueIds = [...new Set(allMatchIds)];
+        console.log(`📊 Total unique match IDs in polls: ${uniqueIds.length}`);
+        return uniqueIds;
     } catch (error) {
         console.error('❌ Error getting poll match IDs:', error);
         return [];
@@ -474,10 +503,15 @@ async function getPollMatchIds() {
 
 async function getMatchesFromActivePolls() {
     const pollMatchIds = await getPollMatchIds();
-    if (pollMatchIds.length === 0) return [];
+    if (pollMatchIds.length === 0) {
+        console.log('📊 No match IDs found in active polls');
+        return [];
+    }
     
     const allMatches = await getMatchesWithCache();
-    return allMatches.filter(m => pollMatchIds.includes(m.id));
+    const filteredMatches = allMatches.filter(m => pollMatchIds.includes(m.id));
+    console.log(`📊 Found ${filteredMatches.length} matches from active polls`);
+    return filteredMatches;
 }
 
 // ==================== MATCH REMINDER (1 Hour Before Kickoff) ====================
@@ -485,7 +519,6 @@ async function checkAndSendMatchReminders() {
     try {
         console.log('⏰ Checking for upcoming match reminders...');
         
-        // 🔥 FIX: Only get matches from active polls
         const matches = await getMatchesFromActivePolls();
         if (!matches || matches.length === 0) {
             console.log('📊 No matches found in active polls');
@@ -494,18 +527,19 @@ async function checkAndSendMatchReminders() {
 
         const now = new Date();
         const groupIds = await getGroupIds();
-        if (groupIds.length === 0) return;
+        if (groupIds.length === 0) {
+            console.log('⚠️ No groups found, skipping match reminders');
+            return;
+        }
 
         let remindersSent = 0;
 
         for (const match of matches) {
-            // Skip if we already sent a reminder for this match
             if (sentMatchReminders[match.id]) continue;
 
             const kickoff = new Date(match.kickoff);
-            const timeDiff = (kickoff - now) / (1000 * 60); // Minutes until kickoff
+            const timeDiff = (kickoff - now) / (1000 * 60);
 
-            // Send reminder when match is 60-65 minutes away
             if (timeDiff > 55 && timeDiff <= 65) {
                 const message = `⏰ *Match Starting Soon!*\n\n` +
                     `⚽ ${match.team1} vs ${match.team2}\n` +
@@ -527,7 +561,6 @@ async function checkAndSendMatchReminders() {
                 sentMatchReminders[match.id] = true;
                 remindersSent++;
                 
-                // Clean up old entries
                 const keys = Object.keys(sentMatchReminders);
                 if (keys.length > 50) {
                     const sorted = keys.sort();
@@ -554,7 +587,7 @@ function scheduleMatchReminders() {
     console.log('⏰ Match reminder checker scheduled (runs every 10 minutes)');
     matchReminderInterval = setInterval(() => {
         safeExecute(checkAndSendMatchReminders, 'checkAndSendMatchReminders');
-    }, 10 * 60 * 1000); // 10 minutes
+    }, 10 * 60 * 1000);
 }
 
 // ==================== POINTS ANNOUNCEMENT ====================
@@ -562,14 +595,12 @@ async function checkAndSendPointsAnnouncements() {
     try {
         console.log('🏆 Checking for new match results to announce...');
         
-        // 🔥 FIX: Only get matches from active polls
         const matches = await getMatchesFromActivePolls();
         if (!matches || matches.length === 0) {
             console.log('📊 No matches found in active polls');
             return;
         }
 
-        // Filter for completed matches that have scores
         const completedMatches = matches.filter(m => 
             m.status === 'completed' && 
             m.home_score !== undefined && 
@@ -582,15 +613,16 @@ async function checkAndSendPointsAnnouncements() {
         }
 
         const groupIds = await getGroupIds();
-        if (groupIds.length === 0) return;
+        if (groupIds.length === 0) {
+            console.log('⚠️ No groups found, skipping points announcements');
+            return;
+        }
 
         let announcementsSent = 0;
 
         for (const match of completedMatches) {
-            // Skip if we already announced points for this match
             if (sentPointsAnnouncements[match.id]) continue;
 
-            // Check if it was recently completed (within last 2 hours)
             const lastUpdate = new Date(match.last_score_update || match.updated_at || Date.now());
             const timeSinceUpdate = (Date.now() - lastUpdate.getTime()) / (1000 * 60);
 
@@ -599,7 +631,6 @@ async function checkAndSendPointsAnnouncements() {
                 continue;
             }
 
-            // Get votes for this match
             const votes = await getMatchVotesFromServer(match.id) || [];
             const totalVotes = votes.length;
             const correctVotes = votes.filter(v => v.points_earned === 3).length;
@@ -650,7 +681,6 @@ async function checkAndSendPointsAnnouncements() {
             sentPointsAnnouncements[match.id] = true;
             announcementsSent++;
 
-            // Clean up old entries
             const keys = Object.keys(sentPointsAnnouncements);
             if (keys.length > 50) {
                 const sorted = keys.sort();
@@ -676,49 +706,44 @@ function schedulePointsAnnouncements() {
     console.log('🏆 Points announcement checker scheduled (runs every 10 minutes)');
     pointsCheckInterval = setInterval(() => {
         safeExecute(checkAndSendPointsAnnouncements, 'checkAndSendPointsAnnouncements');
-    }, 10 * 60 * 1000); // 10 minutes
+    }, 10 * 60 * 1000);
 }
 
 // ==================== COMMAND HANDLERS ====================
-async function handleScheduleCommand(sock, from) {
-    try {
-        // 🔥 FIX: Only show matches from active polls
-        const matches = await getMatchesFromActivePolls();
+async function handleCommands(sock, msg) {
+    const msgData = msg.messages[0];
+    if (!msgData.key.fromMe && msgData.message?.conversation) {
+        const text = msgData.message.conversation.trim();
+        const from = msgData.key.remoteJid;
+        const sender = msgData.key.participant || msgData.key.remoteJid;
+        const isGroup = from.endsWith('@g.us');
+        if (isGroup) await saveGroup(from);
         
-        if (!matches || matches.length === 0) {
-            return await sock.sendMessage(from, { text: '📅 No matches available in current polls.' });
-        }
-
-        // Filter to today's matches only
-        const today = new Date().toDateString();
-        const todayMatches = matches.filter(m => {
-            const matchDate = new Date(m.kickoff).toDateString();
-            return matchDate === today;
-        });
-
-        if (todayMatches.length === 0) {
-            return await sock.sendMessage(from, { text: '📅 No matches scheduled for today in current polls.' });
-        }
-
-        let message = '📅 *Today\'s Poll Matches*\n\n';
-        todayMatches.forEach(m => {
-            const time = formatTime(m.kickoff);
-            const status = m.status === 'completed' ? '✅' : '⏳';
-            message += `${status} ${m.team1} vs ${m.team2}\n`;
-            message += `⏰ ${time}\n\n`;
-        });
-
-        message += `📊 Vote now: ${WEB_URL}/vote.php`;
-        await sock.sendMessage(from, { text: message });
-    } catch (error) {
-        console.error(error);
-        await sock.sendMessage(from, { text: '⚠️ Error fetching schedule. Please try again.' });
+        const pushName = msgData.pushName || '';
+        const waNumber = getUserId(sender);
+        const displayName = pushName || waNumber;
+        
+        console.log(`📩 Received: "${text}" from ${displayName}`);
+        let profilePic = await fetchProfilePicture(sock, sender);
+        await registerUserOnServer(waNumber, displayName, profilePic);
+        
+        const parts = text.split(' ');
+        const command = parts[0].toLowerCase();
+        
+        if (command === '!vote') return await handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName);
+        if (command === '!poll') return await handlePollCommand(sock, from);
+        if (command === '!rank' || command === '!leaderboard') return await handleRankCommand(sock, from, waNumber);
+        if (command === '!points' || command === '!mypoints') return await handlePointsCommand(sock, from, waNumber);
+        if (command === '!schedule') return await handleScheduleCommand(sock, from);
+        if (command === '!results') return await handleResultsCommand(sock, from);
+        if (command === '!stats') return await handleStatsCommand(sock, from, waNumber);
+        if (command === '!status') return await handleStatusCommand(sock, from);
+        if (command === '!help' || command === '!menu') return await handleHelpCommand(sock, from);
     }
 }
 
 // ==================== COMMAND FUNCTIONS ====================
 
-// !vote - Get voting link
 async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayName) {
     const votingLink = `${WEB_URL}/vote.php?wa=${waNumber}`;
     try {
@@ -738,7 +763,6 @@ async function handleVoteCommand(sock, from, sender, isGroup, waNumber, displayN
     }
 }
 
-// !poll - View poll status
 async function handlePollCommand(sock, from) {
     try {
         const polls = await getPollsFromServer();
@@ -816,7 +840,6 @@ async function handlePollCommand(sock, from) {
     }
 }
 
-// !rank - Leaderboard (renamed)
 async function handleRankCommand(sock, from, waNumber) {
     try {
         const data = await getLeaderboardFromServer();
@@ -837,7 +860,6 @@ async function handleRankCommand(sock, from, waNumber) {
     }
 }
 
-// !points - User's own points
 async function handlePointsCommand(sock, from, waNumber) {
     try {
         const user = await getUserStatsFromServer(waNumber);
@@ -861,16 +883,14 @@ async function handlePointsCommand(sock, from, waNumber) {
     }
 }
 
-// !schedule - Today's matches
 async function handleScheduleCommand(sock, from) {
     try {
-        const matches = await getUpcomingMatchesWithCache();
+        const matches = await getMatchesFromActivePolls();
         
         if (!matches || matches.length === 0) {
-            return await sock.sendMessage(from, { text: '📅 No upcoming matches scheduled.' });
+            return await sock.sendMessage(from, { text: '📅 No matches available in current polls.' });
         }
 
-        // Filter to today's matches only
         const today = new Date().toDateString();
         const todayMatches = matches.filter(m => {
             const matchDate = new Date(m.kickoff).toDateString();
@@ -878,13 +898,14 @@ async function handleScheduleCommand(sock, from) {
         });
 
         if (todayMatches.length === 0) {
-            return await sock.sendMessage(from, { text: '📅 No matches scheduled for today.' });
+            return await sock.sendMessage(from, { text: '📅 No matches scheduled for today in current polls.' });
         }
 
-        let message = '📅 *Today\'s Matches*\n\n';
+        let message = '📅 *Today\'s Poll Matches*\n\n';
         todayMatches.forEach(m => {
             const time = formatTime(m.kickoff);
-            message += `⚽ ${m.team1} vs ${m.team2}\n`;
+            const status = m.status === 'completed' ? '✅' : '⏳';
+            message += `${status} ${m.team1} vs ${m.team2}\n`;
             message += `⏰ ${time}\n\n`;
         });
 
@@ -896,10 +917,8 @@ async function handleScheduleCommand(sock, from) {
     }
 }
 
-// !results - Match results (renamed from matchstatus)
 async function handleResultsCommand(sock, from) {
     try {
-        // 🔥 FIX: Only show results from active polls
         const matches = await getMatchesFromActivePolls();
         
         if (!matches || matches.length === 0) {
@@ -928,7 +947,6 @@ async function handleResultsCommand(sock, from) {
     }
 }
 
-// !stats - User stats (kept)
 async function handleStatsCommand(sock, from, waNumber) {
     try {
         const user = await getUserStatsFromServer(waNumber);
@@ -950,11 +968,11 @@ async function handleStatsCommand(sock, from, waNumber) {
     }
 }
 
-// !status - Bot health
 async function handleStatusCommand(sock, from) {
     try {
         const groupIds = await getGroupIds();
         const activeMatches = await getActiveMatchCount();
+        const pollMatchIds = await getPollMatchIds();
         
         const status = `🤖 *Bot Status*\n\n` +
             `✅ Connected: ${sock ? 'Yes' : 'No'}\n` +
@@ -962,6 +980,7 @@ async function handleStatusCommand(sock, from) {
             `👥 Groups: ${groupIds.length}\n` +
             `📊 Active matches: ${activeMatches}\n` +
             `📊 Cached matches: ${matchesCache.length}\n` +
+            `📊 Poll matches: ${pollMatchIds.length}\n` +
             `⏰ Daily reminder: 11:00 AM UAE time\n` +
             `⏰ Match reminders: 1 hour before kickoff (every 10 min)\n` +
             `🏆 Points announcements: Every 10 min\n\n` +
@@ -974,7 +993,6 @@ async function handleStatusCommand(sock, from) {
     }
 }
 
-// !help - Help menu
 async function handleHelpCommand(sock, from) {
     const response = `📋 *Available Commands*\n\n` +
         `🗳️ *!vote* - Get your voting link\n` +
