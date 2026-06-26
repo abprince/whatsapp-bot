@@ -386,7 +386,7 @@ async function autoDiscoverGroups() {
     }
 }
 
-// ==================== DAILY REMINDER ====================
+// ==================== DAILY REMINDER (FIXED TIMEZONE) ====================
 async function sendDailyReminder() {
     try {
         console.log('⏰ Sending daily reminder...');
@@ -440,18 +440,31 @@ function scheduleDailyReminder() {
         reminderInterval = null;
     }
     
+    // UAE is UTC+4 (no DST)
     const now = new Date();
-    const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
-    const targetTime = new Date(uaeTime);
-    targetTime.setHours(11, 0, 0, 0);
+    const uaeMs = now.getTime() + (4 * 60 * 60 * 1000);
+    const uaeNow = new Date(uaeMs);
     
-    if (uaeTime > targetTime) {
-        targetTime.setDate(targetTime.getDate() + 1);
+    // Target: 11:00 AM UAE
+    const targetMs = new Date(uaeNow);
+    targetMs.setHours(11, 0, 0, 0);
+    targetMs.setMinutes(0);
+    targetMs.setSeconds(0);
+    targetMs.setMilliseconds(0);
+    
+    // If past 11 AM, add a day
+    if (uaeNow.getHours() >= 11) {
+        targetMs.setDate(targetMs.getDate() + 1);
     }
     
-    const msUntilTarget = targetTime.getTime() - uaeTime.getTime();
+    const msUntilTarget = targetMs.getTime() - uaeNow.getTime();
     
-    console.log(`⏰ Daily reminder scheduled for: ${targetTime.toLocaleString('en-US', { timeZone: 'Asia/Dubai' })}`);
+    // Convert back to Date objects for logging
+    const displayNow = new Date(uaeNow.getTime() - (4 * 60 * 60 * 1000));
+    const displayTarget = new Date(targetMs.getTime() - (4 * 60 * 60 * 1000));
+    
+    console.log(`⏰ Current UAE time: ${displayNow.toLocaleString('en-US', { timeZone: 'Asia/Dubai', hour12: false })}`);
+    console.log(`⏰ Daily reminder scheduled for: ${displayTarget.toLocaleString('en-US', { timeZone: 'Asia/Dubai', hour12: false })} UAE time`);
     console.log(`⏰ Will run in ${Math.round(msUntilTarget / 60000)} minutes`);
     
     reminderScheduled = true;
@@ -590,7 +603,7 @@ function scheduleMatchReminders() {
     }, 10 * 60 * 1000);
 }
 
-// ==================== POINTS ANNOUNCEMENT ====================
+// ==================== POINTS ANNOUNCEMENT (WITH USER NAMES) ====================
 async function checkAndSendPointsAnnouncements() {
     try {
         console.log('🏆 Checking for new match results to announce...');
@@ -636,10 +649,25 @@ async function checkAndSendPointsAnnouncements() {
             const correctVotes = votes.filter(v => v.points_earned === 3).length;
             const wrongVotes = totalVotes - correctVotes;
 
-            const correctUsers = votes
-                .filter(v => v.points_earned === 3)
-                .slice(0, 3)
-                .map(v => v.name || v.wa_number);
+            // 🔥 FIX: Get user names for correct voters
+            const correctUsers = [];
+            const correctVoters = votes.filter(v => v.points_earned === 3);
+            
+            for (const voter of correctVoters) {
+                let userName = voter.name || voter.wa_number;
+                
+                // If name is not available in the vote object, fetch from users table
+                if (!voter.name || voter.name === voter.wa_number) {
+                    const userStats = await getUserStatsFromServer(voter.wa_number);
+                    if (userStats && userStats.name) {
+                        userName = userStats.name;
+                    }
+                }
+                correctUsers.push(userName);
+            }
+            
+            // Get top 3
+            const topUsers = correctUsers.slice(0, 3);
 
             const winner = match.winner || 'Draw';
             const score = match.score || `${match.home_score || 0}-${match.away_score || 0}`;
@@ -653,9 +681,9 @@ async function checkAndSendPointsAnnouncements() {
                 `❌ Wrong predictions: ${wrongVotes}\n` +
                 `📊 Total votes: ${totalVotes}\n`;
 
-            if (correctUsers.length > 0) {
+            if (topUsers.length > 0) {
                 message += `\n👏 *Top Predictors:*\n`;
-                correctUsers.forEach((user, i) => {
+                topUsers.forEach((user, i) => {
                     message += `${i+1}. ${user}\n`;
                 });
             }
@@ -794,12 +822,16 @@ async function handlePollCommand(sock, from) {
             const votes = await getMatchVotesFromServer(match.id) || [];
             const votedUserIds = votes.map(v => String(v.wa_number));
 
+            // 🔥 FIX: Use user names from leaderboard
             let missingVotersNames = [];
-            leaderboardUsers.forEach(user => {
+            for (const user of leaderboardUsers) {
                 const userIdStr = String(user.wa_number);
                 
                 if (!votedUserIds.includes(userIdStr)) {
-                    missingVotersNames.push(user.name);
+                    // Use the user's name from the leaderboard
+                    const userName = user.name || user.wa_number;
+                    missingVotersNames.push(userName);
+                    
                     if (user.mob_number) {
                         const cleanMobile = String(user.mob_number).replace(/\D/g, '');
                         const mentionJid = `${cleanMobile}@s.whatsapp.net`;
@@ -808,7 +840,7 @@ async function handlePollCommand(sock, from) {
                         }
                     }
                 }
-            });
+            }
 
             if (missingVotersNames.length > 0) {
                 responseText += `⏳ *Pending Votes:* ${missingVotersNames.join(', ')}\n\n`;
@@ -847,6 +879,7 @@ async function handleRankCommand(sock, from, waNumber) {
 
         let response = '🏆 *Rankings*\n\n';
         data.forEach((user, index) => {
+            // 🔥 FIX: Use the user's name from the database
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
@@ -868,8 +901,10 @@ async function handlePointsCommand(sock, from, waNumber) {
         const accuracy = user.total_predictions > 0 ? 
             Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
 
-        let responseText = `📊 *Your Stats*\n\n` +
-            `👤 Name: ${user.name || 'Not set'}\n` +
+        // 🔥 FIX: Use the user's name
+        const displayName = user.name || user.wa_number || 'You';
+
+        let responseText = `📊 *${displayName}'s Stats*\n\n` +
             `⭐ Points: ${user.total_points || 0}\n` +
             `✅ Correct: ${user.correct_predictions || 0}\n` +
             `📊 Total predictions: ${user.total_predictions || 0}\n` +
@@ -955,8 +990,11 @@ async function handleStatsCommand(sock, from, waNumber) {
         const accuracy = user.total_predictions > 0 ? 
             Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
 
-        let responseText = `📊 *Your Stats*\n\n` +
-            `👤 Name: ${user.name || 'Not set'}\n` +
+        // 🔥 FIX: Use the user's name
+        const displayName = user.name || user.wa_number || 'You';
+
+        let responseText = `📊 *${displayName}'s Stats*\n\n` +
+            `👤 Name: ${displayName}\n` +
             `⭐ Points: ${user.total_points || 0}\n` +
             `✅ Correct: ${user.correct_predictions || 0}/${user.total_predictions || 0}\n` +
             `🎯 Accuracy: ${accuracy}%`;
