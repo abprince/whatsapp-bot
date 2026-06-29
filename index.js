@@ -27,6 +27,10 @@ const MAX_ERRORS = 10;
 let sentMatchReminders = {};
 let sentPointsAnnouncements = {};
 
+// ===== FIX: Daily reminder tracking =====
+let reminderSentToday = false;
+let lastReminderDate = null;
+
 // ==================== CACHE SYSTEM ====================
 let matchesCache = [];
 let lastCacheUpdate = null;
@@ -158,6 +162,10 @@ app.get('/debug', (req, res) => {
         cache: {
             matches: matchesCache.length,
             lastUpdate: lastCacheUpdate ? new Date(lastCacheUpdate).toISOString() : null
+        },
+        reminder: {
+            sentToday: reminderSentToday,
+            lastSent: lastReminderDate
         }
     });
 });
@@ -173,6 +181,7 @@ app.get('/', (req, res) => {
         <hr>
         <p><a href="${WEB_URL}" target="_blank"><b>📊 View Dashboard</b></a></p>
         <p>Bot Number: ${BOT_NUMBER}</p>
+        <p>Daily Reminder: ${reminderSentToday ? '✅ Sent today' : '⏳ Not sent yet'}</p>
     `);
 });
 
@@ -266,15 +275,25 @@ async function connectToWhatsApp() {
                 
                 await autoDiscoverGroups();
                 
-                reminderScheduled = false;
-                scheduleDailyReminder();
-                scheduleMatchReminders();
-                schedulePointsAnnouncements();
-                await getMatchesWithCache(true);
+                // ===== FIX: Only schedule if not already scheduled =====
+                if (!reminderScheduled) {
+                    reminderScheduled = false; // Reset to allow scheduling
+                    scheduleDailyReminder();
+                    scheduleMatchReminders();
+                    schedulePointsAnnouncements();
+                    await getMatchesWithCache(true);
+                } else {
+                    console.log('⏰ Reminders already scheduled, skipping...');
+                }
             }
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 console.log(`❌ Connection closed. Status: ${statusCode}`);
+                
+                // Reset flags on reconnect
+                reminderScheduled = false;
+                reminderSentToday = false;
+                
                 if (statusCode !== DisconnectReason.loggedOut) {
                     reconnectAttempts++;
                     if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
@@ -386,8 +405,17 @@ async function autoDiscoverGroups() {
     }
 }
 
-// ==================== DAILY REMINDER (FIXED TIMEZONE) ====================
+// ==================== DAILY REMINDER (FIXED - ONLY ONCE PER DAY) ====================
 async function sendDailyReminder() {
+    // ===== FIX: Only send once per day =====
+    const today = new Date().toDateString();
+    
+    // If already sent today, skip
+    if (reminderSentToday && lastReminderDate === today) {
+        console.log(`⏰ Daily reminder already sent today (${today}), skipping...`);
+        return;
+    }
+    
     try {
         console.log('⏰ Sending daily reminder...');
         const groupIds = await getGroupIds();
@@ -413,17 +441,34 @@ async function sendDailyReminder() {
             }
         } catch (e) {}
         
-        const message = `🌅 *Good Morning!* 🌅\n\n⚽ *World Cup Predictions*\n\n📊 *Today's Poll is Open!*\n\nClick below to submit your predictions:\n🔗 ${pollLink}\n${matchInfo}\n\n📊 Rankings: ${WEB_URL}/leaderboard.php\n\nGood luck! 🍀`;
+        const message = `🌅 *Good Morning!* 🌅\n\n⚽ *World Cup Predictions*\n\n📊 *Today's Poll is Open!*\n\nClick below to submit your predictions:\n🔗 ${pollLink}${matchInfo}\n\n📊 Rankings: ${WEB_URL}/leaderboard.php\n\nGood luck! 🍀`;
+        
+        // Use a Set to track sent groups (prevent duplicates)
+        const sentGroups = new Set();
         
         for (const groupId of groupIds) {
+            // Skip if already sent to this group
+            if (sentGroups.has(groupId)) {
+                console.log(`⏭️ Skipping duplicate for ${groupId}`);
+                continue;
+            }
+            
             try {
                 await sock.sendMessage(groupId, { text: message });
+                sentGroups.add(groupId);
                 console.log(`✅ Reminder sent to: ${groupId}`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 2000));
             } catch (error) {
                 console.error(`❌ Failed to send to ${groupId}:`, error.message);
             }
         }
+        
+        // ===== MARK AS SENT TODAY =====
+        reminderSentToday = true;
+        lastReminderDate = today;
+        
+        console.log(`✅ Daily reminder completed! Sent to ${sentGroups.size} groups`);
+        
     } catch (error) {
         console.error('❌ Error sending daily reminder:', error);
     }
@@ -439,6 +484,17 @@ function scheduleDailyReminder() {
         clearInterval(reminderInterval);
         reminderInterval = null;
     }
+    
+    // Reset the daily flag at midnight
+    const resetDailyFlag = () => {
+        const today = new Date().toDateString();
+        if (lastReminderDate !== today) {
+            reminderSentToday = false;
+        }
+    };
+    
+    // Check and reset daily flag every hour
+    setInterval(resetDailyFlag, 60 * 60 * 1000);
     
     // UAE is UTC+4 (no DST)
     const now = new Date();
@@ -470,8 +526,19 @@ function scheduleDailyReminder() {
     reminderScheduled = true;
     
     setTimeout(() => {
+        // Reset the flag before sending (in case it's a new day)
+        reminderSentToday = false;
         sendDailyReminder();
-        reminderInterval = setInterval(sendDailyReminder, 24 * 60 * 60 * 1000);
+        
+        // Set up the daily interval
+        reminderInterval = setInterval(() => {
+            // Reset flag for new day before sending
+            const today = new Date().toDateString();
+            if (lastReminderDate !== today) {
+                reminderSentToday = false;
+            }
+            sendDailyReminder();
+        }, 24 * 60 * 60 * 1000);
     }, msUntilTarget);
 }
 
@@ -822,13 +889,11 @@ async function handlePollCommand(sock, from) {
             const votes = await getMatchVotesFromServer(match.id) || [];
             const votedUserIds = votes.map(v => String(v.wa_number));
 
-            // 🔥 FIX: Use user names from leaderboard
             let missingVotersNames = [];
             for (const user of leaderboardUsers) {
                 const userIdStr = String(user.wa_number);
                 
                 if (!votedUserIds.includes(userIdStr)) {
-                    // Use the user's name from the leaderboard
                     const userName = user.name || user.wa_number;
                     missingVotersNames.push(userName);
                     
@@ -879,7 +944,6 @@ async function handleRankCommand(sock, from, waNumber) {
 
         let response = '🏆 *Rankings*\n\n';
         data.forEach((user, index) => {
-            // 🔥 FIX: Use the user's name from the database
             const name = user.name || user.wa_number || 'Anonymous';
             const isYou = user.wa_number === waNumber ? ' 👈' : '';
             const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
@@ -901,7 +965,6 @@ async function handlePointsCommand(sock, from, waNumber) {
         const accuracy = user.total_predictions > 0 ? 
             Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
 
-        // 🔥 FIX: Use the user's name
         const displayName = user.name || user.wa_number || 'You';
 
         let responseText = `📊 *${displayName}'s Stats*\n\n` +
@@ -990,7 +1053,6 @@ async function handleStatsCommand(sock, from, waNumber) {
         const accuracy = user.total_predictions > 0 ? 
             Math.round((user.correct_predictions / user.total_predictions) * 100) : 0;
 
-        // 🔥 FIX: Use the user's name
         const displayName = user.name || user.wa_number || 'You';
 
         let responseText = `📊 *${displayName}'s Stats*\n\n` +
@@ -1021,7 +1083,8 @@ async function handleStatusCommand(sock, from) {
             `📊 Poll matches: ${pollMatchIds.length}\n` +
             `⏰ Daily reminder: 11:00 AM UAE time\n` +
             `⏰ Match reminders: 1 hour before kickoff (every 10 min)\n` +
-            `🏆 Points announcements: Every 10 min\n\n` +
+            `🏆 Points announcements: Every 10 min\n` +
+            `📅 Last reminder sent: ${lastReminderDate || 'Never'}\n\n` +
             `📱 ${WEB_URL}`;
         
         await sock.sendMessage(from, { text: status });
@@ -1051,7 +1114,7 @@ async function handleHelpCommand(sock, from) {
 // ==================== START SERVER & BOT ====================
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📱 Bot will send daily reminder at 11:00 AM UAE time`);
+    console.log(`📱 Bot will send daily reminder at 11:00 AM UAE time (ONCE per day)`);
     console.log(`⏰ Match reminders: 1 hour before kickoff (every 10 minutes)`);
     console.log(`🏆 Points announcements: Every 10 minutes`);
     console.log(`📊 Cache TTL: 30 minutes`);
