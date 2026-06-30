@@ -18,18 +18,45 @@ let sock;
 let currentQR = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
-let reminderScheduled = false;
-let reminderInterval = null;
-let matchReminderInterval = null;
-let pointsCheckInterval = null;
 let errorCount = 0;
 const MAX_ERRORS = 10;
 let sentMatchReminders = {};
 let sentPointsAnnouncements = {};
 
-// ===== FIX: Daily reminder tracking =====
-let reminderSentToday = false;
-let lastReminderDate = null;
+// ===== REMINDER STATE =====
+const REMINDER_STATE_FILE = 'reminder_state.json';
+let reminderState = { lastSentDate: null, lastSentTimestamp: null, sentCount: 0, groupsCount: 0 };
+let reminderScheduled = false;
+let reminderTimeout = null;
+let reminderInterval = null;
+let globalSendingReminder = false;
+
+// ==================== REMINDER STATE MANAGEMENT ====================
+function loadReminderState() {
+    try {
+        if (fs.existsSync(REMINDER_STATE_FILE)) {
+            const data = fs.readFileSync(REMINDER_STATE_FILE, 'utf8');
+            const state = JSON.parse(data);
+            console.log(`📂 Loaded reminder state: Last sent on ${state.lastSentDate || 'Never'}`);
+            return state;
+        }
+    } catch (error) {
+        console.error('Error loading reminder state:', error);
+    }
+    return { lastSentDate: null, lastSentTimestamp: null, sentCount: 0, groupsCount: 0 };
+}
+
+function saveReminderState(state) {
+    try {
+        fs.writeFileSync(REMINDER_STATE_FILE, JSON.stringify(state, null, 2));
+        console.log(`💾 Reminder state saved: Last sent on ${state.lastSentDate || 'Never'}`);
+    } catch (error) {
+        console.error('Error saving reminder state:', error);
+    }
+}
+
+// Initialize state
+reminderState = loadReminderState();
 
 // ==================== CACHE SYSTEM ====================
 let matchesCache = [];
@@ -153,6 +180,19 @@ app.get('/keep-alive', (req, res) => {
 
 app.get('/ping', (req, res) => res.status(200).json({}));
 app.get('/health', (req, res) => res.status(200).json({}));
+
+app.get('/reminder-status', (req, res) => {
+    const state = loadReminderState();
+    res.json({
+        lastSentDate: state.lastSentDate,
+        lastSentTimestamp: state.lastSentTimestamp,
+        sentCount: state.sentCount,
+        groupsCount: state.groupsCount,
+        today: new Date().toDateString(),
+        reminderScheduled: reminderScheduled
+    });
+});
+
 app.get('/debug', (req, res) => {
     res.json({
         status: 'alive',
@@ -164,8 +204,8 @@ app.get('/debug', (req, res) => {
             lastUpdate: lastCacheUpdate ? new Date(lastCacheUpdate).toISOString() : null
         },
         reminder: {
-            sentToday: reminderSentToday,
-            lastSent: lastReminderDate
+            sentToday: reminderState.lastSentDate === new Date().toDateString(),
+            lastSent: reminderState.lastSentDate
         }
     });
 });
@@ -181,7 +221,7 @@ app.get('/', (req, res) => {
         <hr>
         <p><a href="${WEB_URL}" target="_blank"><b>📊 View Dashboard</b></a></p>
         <p>Bot Number: ${BOT_NUMBER}</p>
-        <p>Daily Reminder: ${reminderSentToday ? '✅ Sent today' : '⏳ Not sent yet'}</p>
+        <p>Daily Reminder: ${reminderState.lastSentDate === new Date().toDateString() ? '✅ Sent today' : '⏳ Not sent yet'}</p>
     `);
 });
 
@@ -277,7 +317,8 @@ async function connectToWhatsApp() {
                 
                 // ===== FIX: Only schedule if not already scheduled =====
                 if (!reminderScheduled) {
-                    reminderScheduled = false; // Reset to allow scheduling
+                    // Reload state from file
+                    reminderState = loadReminderState();
                     scheduleDailyReminder();
                     scheduleMatchReminders();
                     schedulePointsAnnouncements();
@@ -290,9 +331,9 @@ async function connectToWhatsApp() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 console.log(`❌ Connection closed. Status: ${statusCode}`);
                 
-                // Reset flags on reconnect
-                reminderScheduled = false;
-                reminderSentToday = false;
+                // ===== FIX: DON'T reset reminder flags =====
+                // reminderScheduled = false;  ← REMOVED
+                // reminderSentToday = false;  ← REMOVED
                 
                 if (statusCode !== DisconnectReason.loggedOut) {
                     reconnectAttempts++;
@@ -405,16 +446,22 @@ async function autoDiscoverGroups() {
     }
 }
 
-// ==================== DAILY REMINDER (FIXED - ONLY ONCE PER DAY) ====================
+// ==================== DAILY REMINDER (FILE-BASED STATE) ====================
 async function sendDailyReminder() {
-    // ===== FIX: Only send once per day =====
     const today = new Date().toDateString();
     
-    // If already sent today, skip
-    if (reminderSentToday && lastReminderDate === today) {
+    // ===== Check from file state =====
+    if (reminderState.lastSentDate === today) {
         console.log(`⏰ Daily reminder already sent today (${today}), skipping...`);
         return;
     }
+    
+    // Prevent overlapping executions
+    if (globalSendingReminder) {
+        console.log('⏰ Already sending reminder, skipping...');
+        return;
+    }
+    globalSendingReminder = true;
     
     try {
         console.log('⏰ Sending daily reminder...');
@@ -445,9 +492,9 @@ async function sendDailyReminder() {
         
         // Use a Set to track sent groups (prevent duplicates)
         const sentGroups = new Set();
+        let successCount = 0;
         
         for (const groupId of groupIds) {
-            // Skip if already sent to this group
             if (sentGroups.has(groupId)) {
                 console.log(`⏭️ Skipping duplicate for ${groupId}`);
                 continue;
@@ -456,6 +503,7 @@ async function sendDailyReminder() {
             try {
                 await sock.sendMessage(groupId, { text: message });
                 sentGroups.add(groupId);
+                successCount++;
                 console.log(`✅ Reminder sent to: ${groupId}`);
                 await new Promise(resolve => setTimeout(resolve, 2000));
             } catch (error) {
@@ -463,37 +511,62 @@ async function sendDailyReminder() {
             }
         }
         
-        // ===== MARK AS SENT TODAY =====
-        reminderSentToday = true;
-        lastReminderDate = today;
+        // ===== SAVE STATE TO FILE =====
+        reminderState.lastSentDate = today;
+        reminderState.lastSentTimestamp = new Date().toISOString();
+        reminderState.sentCount = successCount;
+        reminderState.groupsCount = groupIds.length;
+        saveReminderState(reminderState);
         
-        console.log(`✅ Daily reminder completed! Sent to ${sentGroups.size} groups`);
+        console.log(`✅ Daily reminder completed! Sent to ${successCount} groups`);
         
     } catch (error) {
         console.error('❌ Error sending daily reminder:', error);
+    } finally {
+        globalSendingReminder = false;
     }
 }
 
 function scheduleDailyReminder() {
+    // ===== Prevent multiple schedules =====
     if (reminderScheduled) {
         console.log('⏰ Daily reminder already scheduled, skipping...');
         return;
     }
     
+    // Clear any existing intervals/timeouts
+    if (reminderTimeout) {
+        clearTimeout(reminderTimeout);
+        reminderTimeout = null;
+    }
     if (reminderInterval) {
         clearInterval(reminderInterval);
         reminderInterval = null;
     }
     
-    // Reset the daily flag at midnight
+    // Reload state from file
+    reminderState = loadReminderState();
+    
+    // Check if already sent today
+    const today = new Date().toDateString();
+    if (reminderState.lastSentDate === today) {
+        console.log(`⏰ Daily reminder already sent today (${today}), skipping scheduling.`);
+        reminderScheduled = true;
+        return;
+    }
+    
+    // ===== Reset state at midnight (check every hour) =====
     const resetDailyFlag = () => {
         const today = new Date().toDateString();
-        if (lastReminderDate !== today) {
-            reminderSentToday = false;
+        // Reload state to check if it was updated by another instance
+        const currentState = loadReminderState();
+        if (currentState.lastSentDate !== today) {
+            // If state says it's a new day, we can reset
+            reminderState.lastSentDate = null;
+            saveReminderState(reminderState);
         }
     };
     
-    // Check and reset daily flag every hour
     setInterval(resetDailyFlag, 60 * 60 * 1000);
     
     // UAE is UTC+4 (no DST)
@@ -515,7 +588,6 @@ function scheduleDailyReminder() {
     
     const msUntilTarget = targetMs.getTime() - uaeNow.getTime();
     
-    // Convert back to Date objects for logging
     const displayNow = new Date(uaeNow.getTime() - (4 * 60 * 60 * 1000));
     const displayTarget = new Date(targetMs.getTime() - (4 * 60 * 60 * 1000));
     
@@ -525,20 +597,29 @@ function scheduleDailyReminder() {
     
     reminderScheduled = true;
     
-    setTimeout(() => {
-        // Reset the flag before sending (in case it's a new day)
-        reminderSentToday = false;
-        sendDailyReminder();
+    reminderTimeout = setTimeout(() => {
+        // Reload state before sending (in case it was sent by another instance)
+        reminderState = loadReminderState();
+        const today = new Date().toDateString();
+        if (reminderState.lastSentDate !== today) {
+            sendDailyReminder();
+        } else {
+            console.log(`⏰ Reminder already sent today (${today}), skipping scheduled send.`);
+        }
         
         // Set up the daily interval
-        reminderInterval = setInterval(() => {
-            // Reset flag for new day before sending
-            const today = new Date().toDateString();
-            if (lastReminderDate !== today) {
-                reminderSentToday = false;
-            }
-            sendDailyReminder();
-        }, 24 * 60 * 60 * 1000);
+        if (!reminderInterval) {
+            reminderInterval = setInterval(() => {
+                // Reload state before each attempt
+                reminderState = loadReminderState();
+                const today = new Date().toDateString();
+                if (reminderState.lastSentDate !== today) {
+                    sendDailyReminder();
+                } else {
+                    console.log(`⏰ Reminder already sent today (${today}), skipping interval.`);
+                }
+            }, 24 * 60 * 60 * 1000);
+        }
     }, msUntilTarget);
 }
 
@@ -716,14 +797,13 @@ async function checkAndSendPointsAnnouncements() {
             const correctVotes = votes.filter(v => v.points_earned === 3).length;
             const wrongVotes = totalVotes - correctVotes;
 
-            // 🔥 FIX: Get user names for correct voters
+            // Get user names for correct voters
             const correctUsers = [];
             const correctVoters = votes.filter(v => v.points_earned === 3);
             
             for (const voter of correctVoters) {
                 let userName = voter.name || voter.wa_number;
                 
-                // If name is not available in the vote object, fetch from users table
                 if (!voter.name || voter.name === voter.wa_number) {
                     const userStats = await getUserStatsFromServer(voter.wa_number);
                     if (userStats && userStats.name) {
@@ -1084,7 +1164,7 @@ async function handleStatusCommand(sock, from) {
             `⏰ Daily reminder: 11:00 AM UAE time\n` +
             `⏰ Match reminders: 1 hour before kickoff (every 10 min)\n` +
             `🏆 Points announcements: Every 10 min\n` +
-            `📅 Last reminder sent: ${lastReminderDate || 'Never'}\n\n` +
+            `📅 Last reminder sent: ${reminderState.lastSentDate || 'Never'}\n\n` +
             `📱 ${WEB_URL}`;
         
         await sock.sendMessage(from, { text: status });
@@ -1118,5 +1198,6 @@ app.listen(PORT, () => {
     console.log(`⏰ Match reminders: 1 hour before kickoff (every 10 minutes)`);
     console.log(`🏆 Points announcements: Every 10 minutes`);
     console.log(`📊 Cache TTL: 30 minutes`);
+    console.log(`📂 Reminder state file: ${REMINDER_STATE_FILE}`);
     connectToWhatsApp();
 });
