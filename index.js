@@ -31,6 +31,15 @@ let reminderTimeout = null;
 let reminderInterval = null;
 let globalSendingReminder = false;
 
+// ===== TIMER INTERVALS =====
+let matchReminderInterval = null;
+let pointsCheckInterval = null;
+
+// ==================== CACHE SYSTEM ====================
+let matchesCache = [];
+let lastCacheUpdate = null;
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
 // ==================== REMINDER STATE MANAGEMENT ====================
 function loadReminderState() {
     try {
@@ -57,11 +66,6 @@ function saveReminderState(state) {
 
 // Initialize state
 reminderState = loadReminderState();
-
-// ==================== CACHE SYSTEM ====================
-let matchesCache = [];
-let lastCacheUpdate = null;
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 // ==================== HELPER FUNCTIONS ====================
 function getUserId(jid) {
@@ -315,9 +319,8 @@ async function connectToWhatsApp() {
                 
                 await autoDiscoverGroups();
                 
-                // ===== FIX: Only schedule if not already scheduled =====
+                // ===== Only schedule if not already scheduled =====
                 if (!reminderScheduled) {
-                    // Reload state from file
                     reminderState = loadReminderState();
                     scheduleDailyReminder();
                     scheduleMatchReminders();
@@ -331,10 +334,7 @@ async function connectToWhatsApp() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 console.log(`❌ Connection closed. Status: ${statusCode}`);
                 
-                // ===== FIX: DON'T reset reminder flags =====
-                // reminderScheduled = false;  ← REMOVED
-                // reminderSentToday = false;  ← REMOVED
-                
+                // DON'T reset reminder flags
                 if (statusCode !== DisconnectReason.loggedOut) {
                     reconnectAttempts++;
                     if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
@@ -450,7 +450,7 @@ async function autoDiscoverGroups() {
 async function sendDailyReminder() {
     const today = new Date().toDateString();
     
-    // ===== Check from file state =====
+    // Check from file state
     if (reminderState.lastSentDate === today) {
         console.log(`⏰ Daily reminder already sent today (${today}), skipping...`);
         return;
@@ -490,7 +490,6 @@ async function sendDailyReminder() {
         
         const message = `🌅 *Good Morning!* 🌅\n\n⚽ *World Cup Predictions*\n\n📊 *Today's Poll is Open!*\n\nClick below to submit your predictions:\n🔗 ${pollLink}${matchInfo}\n\n📊 Rankings: ${WEB_URL}/leaderboard.php\n\nGood luck! 🍀`;
         
-        // Use a Set to track sent groups (prevent duplicates)
         const sentGroups = new Set();
         let successCount = 0;
         
@@ -511,7 +510,7 @@ async function sendDailyReminder() {
             }
         }
         
-        // ===== SAVE STATE TO FILE =====
+        // SAVE STATE TO FILE
         reminderState.lastSentDate = today;
         reminderState.lastSentTimestamp = new Date().toISOString();
         reminderState.sentCount = successCount;
@@ -528,7 +527,7 @@ async function sendDailyReminder() {
 }
 
 function scheduleDailyReminder() {
-    // ===== Prevent multiple schedules =====
+    // Prevent multiple schedules
     if (reminderScheduled) {
         console.log('⏰ Daily reminder already scheduled, skipping...');
         return;
@@ -555,13 +554,11 @@ function scheduleDailyReminder() {
         return;
     }
     
-    // ===== Reset state at midnight (check every hour) =====
+    // Reset state at midnight (check every hour)
     const resetDailyFlag = () => {
         const today = new Date().toDateString();
-        // Reload state to check if it was updated by another instance
         const currentState = loadReminderState();
         if (currentState.lastSentDate !== today) {
-            // If state says it's a new day, we can reset
             reminderState.lastSentDate = null;
             saveReminderState(reminderState);
         }
@@ -581,7 +578,6 @@ function scheduleDailyReminder() {
     targetMs.setSeconds(0);
     targetMs.setMilliseconds(0);
     
-    // If past 11 AM, add a day
     if (uaeNow.getHours() >= 11) {
         targetMs.setDate(targetMs.getDate() + 1);
     }
@@ -598,7 +594,6 @@ function scheduleDailyReminder() {
     reminderScheduled = true;
     
     reminderTimeout = setTimeout(() => {
-        // Reload state before sending (in case it was sent by another instance)
         reminderState = loadReminderState();
         const today = new Date().toDateString();
         if (reminderState.lastSentDate !== today) {
@@ -607,10 +602,8 @@ function scheduleDailyReminder() {
             console.log(`⏰ Reminder already sent today (${today}), skipping scheduled send.`);
         }
         
-        // Set up the daily interval
         if (!reminderInterval) {
             reminderInterval = setInterval(() => {
-                // Reload state before each attempt
                 reminderState = loadReminderState();
                 const today = new Date().toDateString();
                 if (reminderState.lastSentDate !== today) {
@@ -751,7 +744,7 @@ function scheduleMatchReminders() {
     }, 10 * 60 * 1000);
 }
 
-// ==================== POINTS ANNOUNCEMENT (WITH USER NAMES) ====================
+// ==================== POINTS ANNOUNCEMENT ====================
 async function checkAndSendPointsAnnouncements() {
     try {
         console.log('🏆 Checking for new match results to announce...');
@@ -797,13 +790,11 @@ async function checkAndSendPointsAnnouncements() {
             const correctVotes = votes.filter(v => v.points_earned === 3).length;
             const wrongVotes = totalVotes - correctVotes;
 
-            // Get user names for correct voters
             const correctUsers = [];
             const correctVoters = votes.filter(v => v.points_earned === 3);
             
             for (const voter of correctVoters) {
                 let userName = voter.name || voter.wa_number;
-                
                 if (!voter.name || voter.name === voter.wa_number) {
                     const userStats = await getUserStatsFromServer(voter.wa_number);
                     if (userStats && userStats.name) {
@@ -813,7 +804,6 @@ async function checkAndSendPointsAnnouncements() {
                 correctUsers.push(userName);
             }
             
-            // Get top 3
             const topUsers = correctUsers.slice(0, 3);
 
             const winner = match.winner || 'Draw';
